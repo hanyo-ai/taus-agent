@@ -54,5 +54,5 @@
 ---
 
 <div align="center">
-  <sub>Built with ❤️ by the TAUS Team</sub>
+  <sub>Built with ❤️ by the HANYO Team</sub>
 </div>
