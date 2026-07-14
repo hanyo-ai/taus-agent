@@ -21,14 +21,15 @@ from browser_use import Agent, ChatBrowserUse
 #     asyncio.run(main())
 
 
-from browser_use import Agent, ChatAnthropic
+from browser_use import Agent
+from browser_use.llm.deepseek.chat import ChatDeepSeek
 from dotenv import load_dotenv
 import asyncio
 
 load_dotenv()
 
 async def main():
-    llm = ChatAnthropic(model='claude-sonnet-4-0', temperature=0.0,api_key="sk-60536fb22eb94bf0bb1c382567c5a9cc", base_url="https://api.deepseek.com")
+    llm = ChatDeepSeek(model='deepseek-chat', api_key="sk-60536fb22eb94bf0bb1c382567c5a9cc")
     task = "打开百度 www.baidu.com, 搜索ai news"
     agent = Agent(task=task, llm=llm)
     await agent.run()
