@@ -1,49 +1,599 @@
 <div align="center">
-  <img src="assets/taus.svg" alt="TAUS Agent Logo" width="200" />
+  <img src="assets/taus.svg" alt="TAUS Agent Logo" width="160" />
   <h1>TAUS Agent</h1>
-  <p><strong>一个高效、可扩展的多智能体 AI 代理框架</strong></p>
+  <p>
+    <strong>English</strong> · <a href="#-中文">中文</a>
+  </p>
+  <p>
+    <em>A lightweight, extensible multi-agent AI framework with built-in tools, persistent memory, and inter-agent messaging.</em>
+  </p>
   <p>
     <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" />
+    <img src="https://img.shields.io/badge/python-≥3.14-3776AB.svg" alt="Python Version" />
     <img src="https://img.shields.io/badge/status-alpha-orange.svg" alt="Status" />
   </p>
 </div>
 
 ---
 
-## 📖 简介
+## ✨ Features
 
-**TAUS Agent** 是一个轻量级但功能强大的 AI 代理框架，支持单智能体与多智能体协作。它内置了丰富的工具集、上下文压缩、持久化记忆和灵活的 API 接口，旨在帮助开发者快速构建智能、可交互的 AI 工作流。
-
-无论是构建自动化脚本助手，还是搭建多 Agent 协作系统，TAUS Agent 都能提供开箱即用的支持。
+| Feature | Description |
+|---|---|
+| 🧰 **Built-in Toolset** | `read`, `bash`, `edit`, `write`, `create_agent` — fully integrated |
+| 🧠 **Persistent Memory** | Auto-generated `MEMORY.md` per agent with cross-session summarization |
+| 🛠️ **Skill System** | Hot-loadable skills from `skills/<name>/SKILL.md` |
+| 📬 **Message Bus** | Inter-agent point-to-point & broadcast messaging with HTTP gateway |
+| 📦 **Context Compression** | Automatic summarization when conversation grows too long |
+| 🤖 **Sub-Agent Spawning** | Spawn isolated sub-agents at runtime via `create_agent` |
+| 🖥️ **REPL & HTTP API** | Interactive terminal & REST/WebSocket endpoints |
+| 🌐 **Browser Automation** | CDP-based browser control (navigate, screenshot, JS eval, DOM ops) |
+| 🧩 **Multi-Provider LLM** | Anthropic, OpenAI, and any OpenAI-compatible backend |
 
 ---
 
-## 🗺️ ROADMAP
+## 📦 Installation
 
-- [ ] **内置工具集** —— `read`、`bash`、`edit`、`write`
-- [ ] **上下文压缩** —— 消息太长时自动摘要
-- [ ] **技能加载** —— 按需加载 `skills/<name>/SKILL.md`
-- [ ] **全局记忆** —— `MEMORY.md` 摘要注入上下文
-- [ ] **子 Agent** —— `create_agent` 创建隔离的子代理
-- [ ] **CLI REPL / HTTP API**
-- [ ] **模型自动切换分配**
-- [ ] **Agent Manager** —— span 追踪支持
-- [ ] **Agent 群组** —— 支持手动创建群组
+```bash
+# Clone the repository
+git clone https://github.com/your-org/taus-agent.git
+cd taus-agent
+
+# Requires Python 3.14+
+python --version  # should be >= 3.14
+
+# Install with uv (recommended)
+pip install uv
+uv sync
+
+# Or with pip
+pip install -e .
+```
+
+## ⚙️ Configuration
+
+Create a `.env` file in the project root:
+
+```bash
+# Required: Model endpoint
+MODEL="claude-sonnet-4-6"
+BASE_URL="http://127.0.0.1:3000/anthropic"
+API_KEY="your-api-key"
+
+# Optional: enable reasoning mode
+THINKING=1
+
+# Optional: provider (anthropic, openai)
+# PROVIDER=openai
+```
+
+---
+
+## 🚀 Quick Start
+
+### REPL Mode
+
+```bash
+python main.py
+```
+
+Start chatting with the agent directly in your terminal — it has access to all built-in tools and loaded skills.
+
+### Python API
+
+```python
+import asyncio
+from src.agent.core import Agent
+from src.agent.llm import ClientConfig
+
+config = ClientConfig(
+    model="claude-sonnet-4-6",
+    api_key="your-key",
+    base_url="http://127.0.0.1:3000/anthropic",
+)
+
+agent = Agent(config, agent_name="my-agent", skills_dir="skills")
+response = await agent.run("Hello, what can you do?")
+print(response)
+```
+
+### HTTP / WebSocket Server
+
+```bash
+uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+The HTTP gateway enables external services to send messages to agents on the bus.
+
+---
+
+## 🧠 Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│                    main.py                       │
+│  ┌──────────────┐       ┌──────────────────┐    │
+│  │  Bus Agent    │       │   REPL Agent     │    │
+│  │  (endpoint)   │ ◄────►│   (terminal)     │    │
+│  └──────┬───────┘       └──────────────────┘    │
+│         │                                        │
+│  ┌──────┴───────────────────────────────────┐   │
+│  │          Message Bus                      │   │
+│  │  · Point-to-point · Broadcast · Logging   │   │
+│  └──────┬───────────────────────────────────┘   │
+│         │                                        │
+│  ┌──────┴───────┐   ┌──────────────────┐        │
+│  │  HTTP Gateway│   │   Agent Runner    │        │
+│  │  (FastAPI)   │   │  (in-process)     │        │
+│  └──────────────┘   └──────────────────┘        │
+└─────────────────────────────────────────────────┘
+```
+
+### Core Modules
+
+| Module | Path | Role |
+|---|---|---|
+| **Agent Core** | `src/agent/core.py` | Agent lifecycle, tool dispatch, context management |
+| **LLM Client** | `src/agent/llm.py` | Multi-provider AI client (Anthropic / OpenAI) |
+| **Message Bus** | `src/agent/mbus/` | Inter-agent messaging, HTTP gateway, agent runner |
+| **Tool System** | `src/agent/tool.py` | Tool registry, schema generation, core tool definitions |
+| **Persistence** | `src/agent/persistence.py` | Session management, state serialization |
+| **Context** | `src/agent/context.py` | Conversation history with compression |
+| **Skill Loader** | `src/agent/skill_loader.py` | Hot-load `<skill>/SKILL.md` as system instruction |
+| **Browser** | `src/browser/` | CDP-based browser automation (page, element, mouse) |
+| **REPL** | `src/utils/repl.py` | Interactive prompt with tab-completion |
+
+---
+
+## 🛠️ Tool System
+
+Every agent comes with a core set of tools:
+
+| Tool | Description |
+|---|---|
+| `read` | Read file contents with line numbers & pagination |
+| `bash` | Execute shell commands (with timeout) |
+| `edit` | Precise file editing via text replacement |
+| `write` | Create or overwrite files |
+| `create_agent` | Spawn a sub-agent with its own context & skills |
+
+Tools are registered in `src/agent/tools/` and loaded through `ToolRegistry`. Each tool is a Python function with Pydantic-style type annotations that are automatically converted to LLM tool schemas.
+
+---
+
+## 🧩 Skill System
+
+Skills are Markdown instructions placed in `skills/<name>/SKILL.md`. They can be loaded at runtime:
+
+```
+skills/
+├── news-aggregator/SKILL.md      # Multi-source news aggregation
+├── ble-scanner/SKILL.md          # BLE device scanning & control
+├── xiaohongshu-scraper/SKILL.md  # RED (Xiaohongshu) scraping
+├── x-poster/SKILL.md             # X/Twitter posting automation
+└── browser-automation/SKILL.md   # CDP browser automation
+```
+
+Use the `load_skill` tool inside a conversation to dynamically load a skill — its contents are injected into the system prompt.
+
+---
+
+## 💾 Persistent Memory
+
+Each agent maintains a `MEMORY.md` file under `.agents/<name>/`:
+
+```
+.agents/
+├── main/
+│   ├── agent.json          # Session state
+│   └── MEMORY.md           # Cross-session user context
+└── repl/
+    ├── agent.json
+    └── MEMORY.md
+```
+
+- **Summary injection**: The section above the first `---` is auto-injected into each conversation.
+- **On-demand detail**: Use `read MEMORY.md` for full context when needed.
+- **Auto-template**: Created automatically on first run.
+
+---
+
+## 📬 Message Bus
+
+The `MessageBus` enables communication between agents:
+
+```python
+from src.agent.mbus import MessageBus, Message
+
+bus = MessageBus()
+
+# Register endpoints
+bus.register("agent-a")
+bus.register("agent-b")
+
+# Send a message
+await bus.send(Message(sender="agent-a", recipient="agent-b", content="Hello!"))
+
+# Broadcast to all
+await bus.broadcast(Message(sender="agent-a", recipient="*", content="Hi everyone!"))
+```
+
+An HTTP gateway (`HttpGateway`) exposes the bus via FastAPI for external integration.
+
+---
+
+## 📁 Project Structure
+
+```
+taus-agent/
+├── main.py                    # Entry point (REPL + bus agent)
+├── pyproject.toml             # Project metadata & dependencies
+├── README.md                  # This file
+├── LICENSE                    # Apache 2.0
+├── .env                       # Environment configuration
+├── assets/
+│   └── taus.svg              # Logo
+├── src/
+│   ├── agent/
+│   │   ├── core.py           # Agent core
+│   │   ├── llm.py            # LLM client (multi-provider)
+│   │   ├── context.py        # Conversation context
+│   │   ├── prompts.py        # System prompts & memory template
+│   │   ├── tool.py           # Tool registry
+│   │   ├── persistence.py    # Session persistence
+│   │   ├── skill_loader.py   # Skill loading
+│   │   ├── tools/            # Built-in tool implementations
+│   │   └── mbus/             # Message bus & HTTP gateway
+│   ├── browser/              # CDP browser automation
+│   └── utils/                # REPL, completer
+├── skills/                   # Loadable skill definitions
+├── prompts/                  # Additional prompt files
+├── examples/                 # Usage examples
+└── tests/                    # Test suite
+```
+
+---
+
+## 📚 Examples
+
+| Example | File | Description |
+|---|---|---|
+| AI News & Post | `examples/ai_news_and_post.py` | Aggregate news and auto-post to X |
+| Baidu Search | `examples/baidu_search.py` | Browser-based Baidu search |
+| X Auto Reply | `examples/x_auto_reply.py` | Automated replies on X/Twitter |
+| X Grok Reply | `examples/x_grok_reply.py` | Grok-powered X replies |
+| News Step 1 | `examples/step1_news.py` | Single-step news aggregation |
+
+---
+
+## 🗺️ Roadmap
+
+- [x] **Built-in Toolset** — `read`, `bash`, `edit`, `write`, `create_agent`
+- [x] **Context Compression** — Auto-summary for long conversations
+- [x] **Skill Loading** — Hot-load `skills/<name>/SKILL.md`
+- [x] **Persistent Memory** — `MEMORY.md` summary injection
+- [x] **Sub-Agent Spawning** — `create_agent` for isolated sub-agents
+- [x] **Message Bus** — Inter-agent communication & HTTP gateway
+- [ ] **CLI REPL / HTTP API** (improvements)
+- [ ] **Model Auto-Switching**
+- [ ] **Agent Manager** — Span tracing support
+- [ ] **Agent Groups** — Manual group creation
+- [ ] **Progressive Memory Disclosure**
+- [ ] **REST API** — Full external interaction
+- [ ] **SQLite Storage**
+- [ ] **Office CLI & Browser Integration**
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please ensure:
+
+1. Code style is consistent with the project
+2. Tests are added for new features
+3. Documentation is updated accordingly
+
+---
+
+## 📄 License
+
+This project is licensed under the [Apache 2.0 License](LICENSE).
+
+---
+
+<br />
+
+<div align="center">
+  <sub>Built with ❤️</sub>
+</div>
+
+---
+
+<br />
+
+# 🌏 中文
+
+<div align="center">
+  <h1>TAUS Agent</h1>
+  <p><strong>轻量、可扩展的多智能体 AI 框架</strong></p>
+  <p>内置工具集 · 持久化记忆 · 智能体间通信</p>
+</div>
+
+---
+
+## ✨ 特性一览
+
+| 特性 | 描述 |
+|---|---|
+| 🧰 **内置工具集** | `read`、`bash`、`edit`、`write`、`create_agent` 开箱即用 |
+| 🧠 **持久化记忆** | 自动生成 `MEMORY.md`，跨会话摘要注入 |
+| 🛠️ **技能系统** | 从 `skills/<name>/SKILL.md` 热加载技能 |
+| 📬 **消息总线** | 点对点 & 广播通信，附带 HTTP 网关 |
+| 📦 **上下文压缩** | 对话过长时自动压缩摘要 |
+| 🤖 **子 Agent** | 运行时通过 `create_agent` 创建隔离子代理 |
+| 🖥️ **REPL & HTTP API** | 终端交互式对话 & REST/WebSocket 接口 |
+| 🌐 **浏览器自动化** | 基于 CDP 的浏览器控制（导航、截图、JS 执行） |
+| 🧩 **多模型支持** | Anthropic、OpenAI 及兼容后端 |
+
+---
+
+## 📦 安装
+
+```bash
+# 克隆仓库
+git clone https://github.com/your-org/taus-agent.git
+cd taus-agent
+
+# 要求 Python ≥ 3.14
+python --version
+
+# 使用 uv 安装（推荐）
+pip install uv
+uv sync
+
+# 或使用 pip
+pip install -e .
+```
+
+## ⚙️ 配置
+
+在项目根目录创建 `.env` 文件：
+
+```bash
+# 必需：模型端点
+MODEL="claude-sonnet-4-6"
+BASE_URL="http://127.0.0.1:3000/anthropic"
+API_KEY="your-api-key"
+
+# 可选：启用推理模式
+THINKING=1
+
+# 可选：提供商 (anthropic, openai)
+# PROVIDER=openai
+```
+
+---
+
+## 🚀 快速开始
+
+### REPL 模式
+
+```bash
+python main.py
+```
+
+直接在终端与 Agent 对话，所有内置工具和技能随取随用。
+
+### Python API
+
+```python
+import asyncio
+from src.agent.core import Agent
+from src.agent.llm import ClientConfig
+
+config = ClientConfig(
+    model="claude-sonnet-4-6",
+    api_key="your-key",
+    base_url="http://127.0.0.1:3000/anthropic",
+)
+
+agent = Agent(config, agent_name="my-agent", skills_dir="skills")
+response = await agent.run("你好，你能做什么？")
+print(response)
+```
+
+### HTTP / WebSocket 服务
+
+```bash
+uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+HTTP 网关允许外部服务向总线上的 Agent 发送消息。
+
+---
+
+## 🧠 架构
+
+```
+┌─────────────────────────────────────────────────┐
+│                    main.py                       │
+│  ┌──────────────┐       ┌──────────────────┐    │
+│  │  Bus Agent    │       │   REPL Agent     │    │
+│  │  (endpoint)   │ ◄────►│   (终端)         │    │
+│  └──────┬───────┘       └──────────────────┘    │
+│         │                                        │
+│  ┌──────┴───────────────────────────────────┐   │
+│  │          消息总线 (Message Bus)            │   │
+│  │  点对点 · 广播 · 日志                      │   │
+│  └──────┬───────────────────────────────────┘   │
+│         │                                        │
+│  ┌──────┴───────┐   ┌──────────────────┐        │
+│  │  HTTP Gateway│   │   Agent Runner    │        │
+│  │  (FastAPI)   │   │  (进程内)         │        │
+│  └──────────────┘   └──────────────────┘        │
+└─────────────────────────────────────────────────┘
+```
+
+### 核心模块
+
+| 模块 | 路径 | 职责 |
+|---|---|---|
+| **Agent Core** | `src/agent/core.py` | Agent 生命周期、工具调度、上下文管理 |
+| **LLM Client** | `src/agent/llm.py` | 多提供商 AI 客户端 |
+| **Message Bus** | `src/agent/mbus/` | 智能体间通信、HTTP 网关、Agent 运行器 |
+| **Tool System** | `src/agent/tool.py` | 工具注册、Schema 生成、核心工具定义 |
+| **Persistence** | `src/agent/persistence.py` | 会话管理、状态序列化 |
+| **Context** | `src/agent/context.py` | 对话历史与自动压缩 |
+| **Skill Loader** | `src/agent/skill_loader.py` | 热加载技能 Markdown |
+| **Browser** | `src/browser/` | CDP 浏览器自动化 |
+| **REPL** | `src/utils/repl.py` | 交互式终端提示 |
+
+---
+
+## 🛠️ 工具系统
+
+每个 Agent 内置以下核心工具：
+
+| 工具 | 描述 |
+|---|---|
+| `read` | 读取文件内容（支持行号 & 分页） |
+| `bash` | 执行 Shell 命令（支持超时控制） |
+| `edit` | 通过文本替换精确编辑文件 |
+| `write` | 创建或覆写文件 |
+| `create_agent` | 创建拥有独立上下文和技能的 Agent |
+
+工具定义在 `src/agent/tools/` 目录，通过 `ToolRegistry` 注册。每个工具是一个 Python 函数，类型注解自动转换为 LLM 可识别的工具 Schema。
+
+---
+
+## 🧩 技能系统
+
+技能是放置在 `skills/<name>/SKILL.md` 的 Markdown 指令文件，可在运行时加载：
+
+```
+skills/
+├── news-aggregator/SKILL.md       # 多源新闻聚合
+├── ble-scanner/SKILL.md           # BLE 设备扫描与控制
+├── xiaohongshu-scraper/SKILL.md   # 小红书内容抓取
+├── x-poster/SKILL.md              # X/Twitter 自动发帖
+└── browser-automation/SKILL.md    # CDP 浏览器自动化
+```
+
+在对话中使用 `load_skill` 工具即可动态加载技能，其内容会注入到系统提示词中。
+
+---
+
+## 💾 持久化记忆
+
+每个 Agent 在 `.agents/<name>/` 下维护一个 `MEMORY.md` 文件：
+
+```
+.agents/
+├── main/
+│   ├── agent.json          # 会话状态
+│   └── MEMORY.md           # 跨会话用户上下文
+└── repl/
+    ├── agent.json
+    └── MEMORY.md
+```
+
+- **摘要注入**：第一个 `---` 分隔线以上的内容自动注入每次对话
+- **按需详查**：用 `read MEMORY.md` 查看完整内容
+- **自动模板**：首次运行自动创建
+
+---
+
+## 📬 消息总线
+
+`MessageBus` 实现了 Agent 之间的通信：
+
+```python
+from src.agent.mbus import MessageBus, Message
+
+bus = MessageBus()
+
+bus.register("agent-a")
+bus.register("agent-b")
+
+await bus.send(Message(sender="agent-a", recipient="agent-b", content="你好！"))
+
+await bus.broadcast(Message(sender="agent-a", recipient="*", content="大家好！"))
+```
+
+通过 `HttpGateway` 可将消息总线暴露为 FastAPI 接口，供外部系统集成。
+
+---
+
+## 📁 项目结构
+
+```
+taus-agent/
+├── main.py                    # 入口（REPL + 总线 Agent）
+├── pyproject.toml             # 项目元数据 & 依赖
+├── README.md                  # 本文档
+├── LICENSE                    # Apache 2.0
+├── .env                       # 环境配置
+├── assets/
+│   └── taus.svg              # Logo
+├── src/
+│   ├── agent/
+│   │   ├── core.py           # Agent 核心
+│   │   ├── llm.py            # LLM 客户端（多提供商）
+│   │   ├── context.py        # 对话上下文
+│   │   ├── prompts.py        # 系统提示词 & 记忆模板
+│   │   ├── tool.py           # 工具注册
+│   │   ├── persistence.py    # 会话持久化
+│   │   ├── skill_loader.py   # 技能加载
+│   │   ├── tools/            # 内置工具实现
+│   │   └── mbus/             # 消息总线 & HTTP 网关
+│   ├── browser/              # CDP 浏览器自动化
+│   └── utils/                # REPL、自动补全
+├── skills/                   # 可加载的技能定义
+├── prompts/                  # 额外的提示词文件
+├── examples/                 # 使用示例
+└── tests/                    # 测试套件
+```
+
+---
+
+## 📚 示例
+
+| 示例 | 文件 | 描述 |
+|---|---|---|
+| AI 新闻 & 发帖 | `examples/ai_news_and_post.py` | 聚合新闻并自动发布到 X |
+| 百度搜索 | `examples/baidu_search.py` | 基于浏览器的百度搜索 |
+| X 自动回复 | `examples/x_auto_reply.py` | X/Twitter 自动回复 |
+| X Grok 回复 | `examples/x_grok_reply.py` | Grok 驱动的 X 回复 |
+| 新闻第一步 | `examples/step1_news.py` | 单步新闻聚合 |
+
+---
+
+## 🗺️ 开发路线
+
+- [x] **内置工具集** — `read`、`bash`、`edit`、`write`、`create_agent`
+- [x] **上下文压缩** — 长对话自动摘要
+- [x] **技能加载** — 热加载 `skills/<name>/SKILL.md`
+- [x] **持久化记忆** — `MEMORY.md` 摘要注入
+- [x] **子 Agent** — `create_agent` 创建隔离代理
+- [x] **消息总线** — 智能体间通信 & HTTP 网关
+- [ ] **CLI REPL / HTTP API**（持续改进）
+- [ ] **模型自动切换**
+- [ ] **Agent 管理器** — 链路追踪支持
+- [ ] **Agent 群组** — 手动群组创建
 - [ ] **渐进式记忆披露**
-- [ ] **多 Agent 消息总线**
-- [ ] **REST API** —— 支持外部脚本与任意 Agent 通信
+- [ ] **REST API** — 全量外部交互
 - [ ] **SQLite 存储**
-- [ ] **Office CLI & Browser 集成**
+- [ ] **Office CLI & 浏览器集成**
 
 ---
 
 ## 🤝 贡献
 
-欢迎提交 Issue 和 Pull Request！请确保在提交前：
+欢迎提交 Issue 和 Pull Request！请确保：
 
 1. 代码风格与项目保持一致
-2. 添加必要的测试用例
-3. 更新相关文档
+2. 为新功能添加测试用例
+3. 同步更新文档
 
 ---
 
@@ -53,6 +603,8 @@
 
 ---
 
+<br />
+
 <div align="center">
-  <sub>Built with ❤️ by the HANYO Team</sub>
+  <sub>用心构筑 ❤️</sub>
 </div>

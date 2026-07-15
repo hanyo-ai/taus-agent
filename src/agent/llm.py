@@ -24,9 +24,9 @@ claude-haiku / claude-sonnet → deepseek-v4-flash
 
 @dataclass
 class ClientConfig:
-    model: str = field(default_factory=lambda: os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8"))
-    api_key: str = field(default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY", None))
-    base_url: str = field(default_factory=lambda: os.environ.get("ANTHROPIC_BASE_URL", None))
+    model: str = field(default_factory=lambda: os.environ.get("MODEL", "claude-opus-4-8"))
+    api_key: str = field(default_factory=lambda: os.environ.get("API_KEY", None))
+    base_url: str = field(default_factory=lambda: os.environ.get("BASE_URL", None))
     system_prompt: str = "You are a helpful assistant"
     max_token: int = 16384
     max_retrise: int = 3
