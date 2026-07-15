@@ -222,3 +222,5 @@ __marimo__/
 tests/
 examples/
 .agents/
+
+*.png
