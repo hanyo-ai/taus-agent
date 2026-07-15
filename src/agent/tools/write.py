@@ -7,6 +7,7 @@ WRITE_SCHEMA = {
         "Create a new file or completely overwrite an existing file with the given content. "
         "Parent directories are created automatically. Use write only for new files or full "
         "rewrites — for targeted changes to existing files, use the edit tool instead."
+        "New files default to the ./temp/ directory."
     ),
     "input_schema": {
         "type": "object",
