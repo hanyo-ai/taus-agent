@@ -224,3 +224,4 @@ examples/
 .agents/
 
 *.png
+tests/
