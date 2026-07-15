@@ -1,6 +1,7 @@
 """Agent core with redesigned persistence - name-based, session-aware."""
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable, Any
@@ -72,6 +73,10 @@ def _build_system_prompt(
 
     except Exception:
         template = "You are a helpful assistant"
+
+    # Inject current date
+    today = datetime.now().strftime("%Y-%m-%d")
+    template = template.replace("{{DATE}}", today)
 
     # Skills
     if skill_loader:

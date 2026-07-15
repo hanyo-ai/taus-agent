@@ -14,6 +14,24 @@ source .venv/bin/activate
 uv add cdp-use pydantic httpx psutil
 ```
 
+## ⚠️ 运行环境：避免系统代理干扰
+
+如果系统配置了全局代理（SOCKS/HTTP），CDP 和 websockets 连接 `localhost` 也会被代理拦截导致失败。**运行任何 browser 脚本时必须清除代理环境变量：**
+
+```bash
+no_proxy=* NO_PROXY=* python your_script.py
+```
+
+同时，`src/browser/session.py` 中 httpx 客户端已配置 `trust_env=False`（跳过系统代理），不要移除该参数。
+
+**常见报错与原因：**
+
+| 报错 | 原因 |
+|------|------|
+| `JSONDecodeError: Expecting value` 连接 CDP 时 | httpx 走了系统 HTTP 代理，返回 502 |
+| `ImportError: python-socks is required` | websockets 走了系统 SOCKS 代理 |
+| 解决办法 | `no_proxy=* NO_PROXY=* python ...` |
+
 ## 快速开始
 
 ```python
@@ -45,6 +63,8 @@ config = BrowserConfig(
     headless=True,                    # 无头模式
     window_size={"width": 1280, "height": 720},
     disable_security=False,
+    # 代理（访问受限站点时使用）
+    proxy=ProxySettings(server="http://127.0.0.1:12334"),
 )
 
 session = BrowserSession(config=config)
@@ -56,6 +76,7 @@ await session.stop()                  # 停止并清理
 | 方法 | 说明 |
 |------|------|
 | `navigate(url, new_tab=False, wait_until='load')` | 导航到 URL，wait_until: `load` / `domcontentloaded` / `networkidle` / `commit` |
+| `get_current_url()` | 返回当前页面 URL |
 | `get_current_page()` | 返回当前页面的 Page 对象 |
 | `get_pages()` | 返回所有页面的 Page 列表 |
 | `get_tabs()` | 返回 `[{target_id, url, title}]` |
@@ -71,6 +92,10 @@ await session.stop()                  # 停止并清理
 config = BrowserConfig(cdp_url="http://localhost:9222")
 session = BrowserSession(config=config)
 await session.start()
+
+# 查找代理浏览器端口
+# lsof -i -P -n | grep chrome | grep LISTEN  或 
+# ps aux | grep "remote-debugging-port" | grep -v grep
 ```
 
 ### Page — 页面操作
@@ -105,9 +130,12 @@ await page.scroll_to_bottom()
 await page.scroll_to_top()
 pos = await page.get_scroll_position()    # {"x": 0, "y": 1200}
 
-# 键盘
+# 键盘 — type_text 模拟逐字符输入，press_key 按特殊键
 await page.type_text("hello")
 await page.press_key("Enter")
+await page.press_key("Shift+Enter")       # 换行（contenteditable 中）
+await page.press_key("Meta+a")            # Mac 全选
+await page.press_key("Backspace")
 
 # 尺寸
 dims = await page.get_page_dimensions()       # {"width": 1920, "height": 8000}
@@ -125,7 +153,7 @@ await el.double_click()
 await el.right_click()
 await el.hover()
 
-# 输入
+# 输入 — 逐字符 keypress，站点兼容性最好
 await el.type("hello world", clear=True)
 await el.press("Enter")
 
@@ -167,6 +195,100 @@ await mouse.scroll(delta_y=300)             # 向下滚动 300px
 await mouse.scroll(delta_x=-100, delta_y=0) # 向左滚动 100px
 ```
 
+## 输入框交互深度指南
+
+### 策略选择：JS 设值 vs 真实键盘输入
+
+| 方式 | 适用场景 | 不适用场景 |
+|------|----------|------------|
+| `page.evaluate()` JS 设值 + dispatchEvent | 原生 `<input>` / `<textarea>` | React contenteditable div（不会激活框架状态） |
+| `page.type_text()` 真实键盘事件 | **所有场景**，尤其是 React/Vue SPA | 速度稍慢 |
+| `el.type()` CDP dispatchKeyEvent | 普通站点 | 百度等（`Element is not focusable`） |
+
+### ⚠️ React contenteditable 的坑（X/Twitter、小红书等）
+
+**JS 设值不会激活 React 的提交按钮。** X (Twitter) 发帖框是 `<div contenteditable="true">`，用 `editor.textContent = 'xxx'` + `dispatchEvent('input')` 虽然能看到文字，但 React 内部状态未更新，发送按钮始终 disabled。
+
+```python
+# ❌ 错误 — X 发帖按钮仍然 disabled
+await page.evaluate(f"""
+    var editor = document.querySelector('div[contenteditable="true"]');
+    editor.textContent = {json.dumps(content)};
+    editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
+""")
+
+# ✅ 正确 — 用 page.type_text() 逐字符输入
+page = await session.get_current_page()
+editor = await page.query_selector('div[contenteditable="true"]')
+await editor.click()
+await asyncio.sleep(0.3)
+
+lines = content.split('\n')
+for i, line in enumerate(lines):
+    if line:
+        await page.type_text(line)
+    if i < len(lines) - 1:
+        await page.press_key("Shift+Enter")  # contenteditable 中换行
+```
+
+### 已知限制
+
+`Element.type()` 内部调用 `DOM.focus`，部分网站的输入框会报错：
+```
+RuntimeError: {'code': -32000, 'message': 'Element is not focusable'}
+```
+常见于百度 (`#kw`)、使用了自定义组件封装原生 input 的站点。
+
+### 决策流程
+
+```
+输入框填值
+  ├─ 需要激活 React 按钮（X、小红书等）→ page.type_text() 真实键盘输入
+  ├─ 原生 <input>/<textarea> → page.evaluate() JS 设值（快）
+  └─ 普通站点 → el.type(text)
+```
+
+### JS 设值模板（仅用于原生 input/textarea）
+
+```python
+import json
+
+keyword = "hello world"   # 可能含单引号，用 json.dumps 转义
+selector = "#input-id"
+
+await page.evaluate(f"""
+    (function() {{
+        var el = document.querySelector({json.dumps(selector)});
+        if (el) {{
+            el.value = {json.dumps(keyword)};
+            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            return 'ok';
+        }}
+        return null;
+    }})()
+""")
+```
+
+> **为什么用 `json.dumps`：** 当 keyword 含单引号（如 `it's`）时，Python f-string 直接拼接会破坏 JS 语法，`json.dumps` 自动转义为 `"it's"`。
+
+## 代理配置
+
+需要代理访问受限站点时，通过 `ProxySettings` 配置：
+
+```python
+from src.browser import BrowserConfig, BrowserSession, ProxySettings
+
+config = BrowserConfig(
+    headless=False,
+    proxy=ProxySettings(server="http://127.0.0.1:12334"),
+    window_size={"width": 1280, "height": 900},
+)
+session = BrowserSession(config=config)
+await session.start()
+```
+
+代理只影响 Chrome 浏览器的网络请求，不影响 CDP 连接（CDP 是 localhost 直连）。
+
 ## 实用场景
 
 ### 1. 截图并提取页面标题
@@ -184,70 +306,79 @@ async def capture_page(url: str, output: str = "screenshot.png"):
         await session.stop()
 ```
 
-### 2. 表单填写与提交
-
-**输入框交互策略（重要）**
-
-`Element.type()` 内部调用 `DOM.focus` 聚焦元素。部分网站（百度等）的输入框会返回 `RuntimeError: Element is not focusable`。因此输入框填值分成两步：
-
-| 步骤 | 优先方式 | 说明 |
-|------|----------|------|
-| **聚焦** | `el.scroll_into_view()` + `el.click()` | click 比 DOM.focus 更通用，大多数网站都能响应 |
-| **设值** | **`page.evaluate()` JS 设值**（优先推荐） | 绕过 CDP focus 限制，同时触发 `input` 事件让框架感知变化 |
-| 设值（备选） | `el.type(text)` | 仅在 `DOM.focus` 可用的站点使用 |
-
-**为什么优先 JS 设值：**
-1. `el.type()` 逐字符 dispatchKeyEvent，慢且依赖 focus 成功
-2. JS 设值直接 `input.value = 'xxx'`，一次调用完成
-3. 通过 `dispatchEvent(new Event('input', {bubbles:true}))` 触发 React/Vue 等框架的响应
-4. 不依赖 CDP focus 的可用性
+### 2. X (Twitter) 发帖完整流程
 
 ```python
-async def search_form(keyword: str, *, input_selector: str, btn_selector: str = None):
-    """通用搜索表单填值模板。"""
-    session = BrowserSession(BrowserConfig(headless=False))
-    try:
-        await session.start()
-        await session.navigate("https://example.com")
-        page = await session.get_current_page()
+async def post_to_x(session: BrowserSession, content: str) -> bool:
+    """在 X 上发帖。Content 需 ≤ 280 字符。"""
+    import json
 
-        # Step 1: 聚焦输入框（scrollIntoView + click）
-        input_el = await page.query_selector(input_selector)
-        if input_el:
-            await input_el.scroll_into_view()
-            await input_el.click()
-            await asyncio.sleep(0.3)
+    await session.navigate("https://x.com/home", wait_until="load")
+    await asyncio.sleep(4)
 
-        # Step 2: JS 设值（最可靠）
-        import json
-        await page.evaluate(f"""
-            (function() {{
-                var el = document.querySelector({json.dumps(input_selector)});
-                if (el) {{
-                    el.value = {json.dumps(keyword)};
-                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    return 'ok';
-                }}
-                return 'not found';
-            }})()
+    # 检查登录状态
+    logged_in = await session.evaluate("""
+        (function() {
+            var el = document.querySelector('div[contenteditable="true"]');
+            return el ? true : false;
+        })()
+    """)
+    if not logged_in:
+        print("未登录，请在浏览器中手动登录后重试")
+        return False
+
+    page = await session.get_current_page()
+
+    # 点击发帖框
+    editor = await page.query_selector('div[contenteditable="true"]')
+    if not editor:
+        editor = await page.query_selector('div[role="textbox"]')
+    if not editor:
+        print("找不到发帖框")
+        return False
+
+    await editor.click()
+    await asyncio.sleep(0.3)
+
+    # 清空已有内容
+    await page.press_key("Meta+a")
+    await asyncio.sleep(0.1)
+    await page.press_key("Backspace")
+    await asyncio.sleep(0.2)
+
+    # 逐行输入（真实键盘事件，React 才能识别）
+    lines = content.split('\n')
+    for i, line in enumerate(lines):
+        if line:
+            await page.type_text(line)
+            await asyncio.sleep(0.05)
+        if i < len(lines) - 1:
+            await page.press_key("Shift+Enter")
+            await asyncio.sleep(0.05)
+
+    # 等待发送按钮激活
+    for _ in range(10):
+        await asyncio.sleep(0.5)
+        btn_info = await session.evaluate("""
+            (function() {
+                var btn = document.querySelector('[data-testid="tweetButton"]');
+                if (!btn) btn = document.querySelector('[data-testid="tweetButtonInline"]');
+                return btn ? {disabled: btn.disabled} : null;
+            })()
         """)
+        if btn_info and not btn_info["disabled"]:
+            await session.evaluate("""
+                (function() {
+                    var btn = document.querySelector('[data-testid="tweetButton"]');
+                    if (!btn) btn = document.querySelector('[data-testid="tweetButtonInline"]');
+                    if (btn) btn.click();
+                })()
+            """)
+            print("帖子已发送")
+            return True
 
-        # Step 3: 提交（优先点按钮 → 按回车 → JS submit）
-        if btn_selector:
-            btn = await page.query_selector(btn_selector)
-            if btn:
-                await btn.click()
-        else:
-            await page.press_key("Enter")
-
-        await asyncio.sleep(3)
-        await session.screenshot("search_result.png")
-        return page
-    finally:
-        await session.stop()
-
-# 百度搜索示例
-# search_form("ai news", input_selector="#kw", btn_selector="#su")
+    print("按钮未激活，请手动点击发送")
+    return False
 ```
 
 ### 3. 提取页面所有链接
@@ -297,50 +428,6 @@ async def open_multiple_tabs():
         await session.stop()
 ```
 
-## 输入框交互深度指南
-
-### 已知限制
-
-`Element.type()` 内部调用 `DOM.focus`，部分网站的输入框会报错：
-```
-RuntimeError: {'code': -32000, 'message': 'Element is not focusable'}
-```
-常见于百度 (`#kw`)、使用了自定义组件封装原生 input 的站点。
-
-### 决策流程
-
-```
-输入框填值
-  ├─ 普通站点（Google、GitHub 等）→ el.type(text) 直接可用
-  └─ 复杂站点（百度、SPA 等）
-       ├─ Step 1: el.scroll_into_view() + el.click()  聚焦
-       ├─ Step 2: page.evaluate(js设值)               填值（推荐）
-       └─ Step 3: btn.click() / press_key("Enter")    提交
-```
-
-### JS 设值模板
-
-```python
-import json
-
-keyword = "hello world"   # 可能含单引号，用 json.dumps 转义
-selector = "#input-id"
-
-await page.evaluate(f"""
-    (function() {{
-        var el = document.querySelector({json.dumps(selector)});
-        if (el) {{
-            el.value = {json.dumps(keyword)};
-            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-            return 'ok';
-        }}
-        return null;
-    }})()
-""")
-```
-
-> **为什么用 `json.dumps`：** 当 keyword 含单引号（如 `it's`）时，Python f-string 直接拼接会破坏 JS 语法，`json.dumps` 自动转义为 `"it's"`。
-
 ## 注意事项
 
 - 首次运行会创建临时 `user_data_dir`，如需持久化 cookie/登录态，请指定 `BrowserConfig(user_data_dir="/path/to/profile")`
@@ -348,4 +435,6 @@ await page.evaluate(f"""
 - 元素点击会自动尝试 3 种方式计算可点击中心（ContentQuads → BoxModel → getBoundingClientRect），大部分场景无需手动处理
 - 连接已有浏览器时需先手动启动 Chrome：`google-chrome --remote-debugging-port=9222`
 - 同域导航默认 3s 超时，跨域 8s，可通过 `_navigate_and_wait` 的 timeout 参数调整
-- **导航超时警告不影响使用**：部分网站（如百度）可能触发 `Page readiness timeout` 日志，页面实际已可用，后续 query_selector / evaluate 不受影响
+- **导航超时警告不影响使用**：部分网站（如百度、新闻站）可能触发 `Page readiness timeout` 日志，页面实际已可用，后续 query_selector / evaluate 不受影响
+- **运行前清除代理**：`no_proxy=* NO_PROXY=* python ...` 避免系统代理干扰 CDP/websocket 连接
+- **React contenteditable 必须真实键盘输入**：`page.type_text()` / `page.press_key()`，JS 设值不会激活框架状态

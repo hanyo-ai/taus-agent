@@ -240,7 +240,7 @@ class BrowserSession:
                 path = path + '/json/version'
             http_url = urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, parsed.query, parsed.fragment))
 
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0), trust_env=False) as client:
                 headers = self.config.headers or {}
                 resp = await client.get(http_url, headers=headers)
                 cdp_url = resp.json()['webSocketDebuggerUrl']
