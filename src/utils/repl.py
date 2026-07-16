@@ -1,11 +1,19 @@
 import asyncio
+import select
+import sys
+import termios
+import threading
+import tty
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.styles import Style
 
 from src.agent.core import Agent
 from src.agent.persistence import AgentPersistence
+from src.agent.signals import AgentBrake, AgentAborted, AgentPaused
 from src.utils.completer import SlashCompleter
 
 
@@ -17,6 +25,119 @@ REPL_STYLE = Style.from_dict({
     "scrollbar.background": "bg:#1e1e1e",
     "scrollbar.button": "bg:#444444",
 })
+
+repl_brake = AgentBrake("repl")
+
+
+# ── Background stdin watcher ─────────────────────────────────────────────────
+# When agent.run() is executing, prompt_toolkit is no longer listening for
+# keystrokes.  A background thread monitors stdin in raw mode so ESC / Ctrl+C
+# still work mid-flight.
+
+class StdinEscWatcher:
+    """Background thread that watches stdin for ESC / Ctrl+C while the agent
+    is running and prompt_toolkit is not actively waiting for input."""
+
+    def __init__(self, brake: AgentBrake):
+        self.brake = brake
+        self._active = False
+        self._thread: threading.Thread | None = None
+        self._old_settings: list | None = None
+
+    def start(self) -> None:
+        if self._active:
+            return
+        self._active = True
+        self._thread = threading.Thread(target=self._watch, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._active = False
+        if self._thread:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+        self._restore_terminal()
+
+    # ------------------------------------------------------------------
+    def _watch(self) -> None:
+        fd = sys.stdin.fileno()
+        try:
+            self._old_settings = termios.tcgetattr(fd)
+        except (termios.error, IOError):
+            return  # non-tty stdin, bail out
+
+        try:
+            tty.setraw(fd)
+            while self._active:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.3)
+                if not ready:
+                    continue
+                ch = sys.stdin.read(1)
+                if ch == '\x1b':          # ESC
+                    self.brake.pause()
+                elif ch == '\x03':        # Ctrl+C
+                    if self.brake.is_paused():
+                        self.brake.abort()
+                    else:
+                        self.brake.pause()
+        except (termios.error, IOError, ValueError):
+            pass
+        finally:
+            self._restore_terminal()
+
+    def _restore_terminal(self) -> None:
+        if self._old_settings is None:
+            return
+        try:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN,
+                              self._old_settings)
+        except (termios.error, IOError):
+            pass
+        self._old_settings = None
+
+
+_stdin_watcher = StdinEscWatcher(repl_brake)
+
+
+async def _run_with_brake(agent: Agent, message: str) -> str:
+    """Run agent with stdin ESC watcher active, so the user can pause/abort
+    mid-flight via keystrokes."""
+    _stdin_watcher.start()
+    try:
+        return await agent.run(message)
+    except KeyboardInterrupt:
+        # Ctrl+C SIGINT while agent is running — the watcher thread already
+        # wrote the signal file.  Treat as paused.
+        return "[PAUSED]"
+    finally:
+        _stdin_watcher.stop()
+
+
+# ── Key bindings (active while prompt_toolkit is listening) ──
+
+kb = KeyBindings()
+
+
+@kb.add(Keys.Escape)
+def on_escape(event):
+    """ESC = emergency brake: pause the agent."""
+    repl_brake.pause()
+    print("\n⏸️  已暂停。输入纠偏指令后 Enter，或 /go 继续，/abort 中止。\n")
+    # Flush the prompt_toolkit buffer so the user can type correction
+    event.app.renderer.write(event.app.renderer.erase_down())
+
+
+@kb.add(Keys.ControlC)
+def on_ctrl_c(event):
+    """Ctrl+C = force abort the agent."""
+    if repl_brake.is_paused():
+        # Already paused — second Ctrl+C means abort
+        repl_brake.abort()
+        print("\n🛑 已发送中止信号。\n")
+    else:
+        # First Ctrl+C = pause
+        repl_brake.pause()
+        print("\n⏸️  已暂停（Ctrl+C）。/go 继续，/abort 中止。\n")
 
 
 async def _handle_command(agent: Agent, raw: str) -> tuple[bool, Agent | None]:
@@ -30,8 +151,12 @@ async def _handle_command(agent: Agent, raw: str) -> tuple[bool, Agent | None]:
         print("  /help, /h, /?              显示帮助")
         print("  /exit, /q, /quit           退出")
         print("  /reset, /clear             重置对话上下文")
+        print("  /pause, /brake             暂停当前agent（ESC 也可）")
+        print("  /go                        继续执行")
+        print("  /abort                     中止当前任务")
         print("  /mode chat|agent           切换模式")
         print("  /skills                    列出技能")
+        print("  /inject [name]             注入全局技能（无参数则列出可注入项）")
         print("  /save [name]               保存当前agent（可选指定名称）")
         print("  /load <name> [session_id]  加载已保存的agent")
         print("  /agents                    列出所有已保存的agents")
@@ -45,6 +170,21 @@ async def _handle_command(agent: Agent, raw: str) -> tuple[bool, Agent | None]:
     if cmd in ("/exit", "/q", "/quit"):
         print("\nBye!")
         raise EOFError  # 退出 REPL 循环
+
+    if cmd in ("/pause", "/brake"):
+        repl_brake.pause()
+        print("\n⏸️  已暂停。输入 /go 继续，/abort 中止，或输入纠偏指令。\n")
+        return True, None
+
+    if cmd == "/go":
+        repl_brake.resume()
+        print("\n▶️  继续执行。\n")
+        return True, None
+
+    if cmd == "/abort":
+        repl_brake.abort()
+        print("\n🛑 已发送中止信号。\n")
+        return True, None
 
     if cmd in ("/reset", "/clear"):
         agent.context = type(agent.context)()  # 重建上下文
@@ -61,13 +201,33 @@ async def _handle_command(agent: Agent, raw: str) -> tuple[bool, Agent | None]:
         return True, None
 
     if cmd == "/skills":
-        skills = agent.skill_loader.list_skills() if hasattr(agent.skill_loader, "list_skills") else []
+        skills = agent.skill_loader.available() if hasattr(agent.skill_loader, "available") else []
         if skills:
             print("\n已加载技能：")
             for s in skills:
                 print(f"  - {s}")
         else:
             print("\n(无已加载技能)\n")
+        return True, None
+
+    if cmd == "/inject":
+        if not arg:
+            # List available global skills
+            from pathlib import Path
+            global_skills = [d.name for d in Path("skills").iterdir()
+                             if (d / "SKILL.md").exists()]
+            current = set(agent.skill_loader.available())
+            available = [s for s in global_skills if s not in current]
+            if available:
+                print(f"\n可注入的全局技能 ({len(available)}):")
+                for s in available:
+                    print(f"  - {s}")
+                print("\n用法: /inject <name>\n")
+            else:
+                print("\n(无新技能可注入)\n")
+        else:
+            result = agent.inject_skill(arg)
+            print(f"\n{result}\n")
         return True, None
 
     if cmd == "/save":
@@ -80,7 +240,7 @@ async def _handle_command(agent: Agent, raw: str) -> tuple[bool, Agent | None]:
         print(f"\n正在保存 agent...\n")
 
         # Run the agent with the save command
-        await agent.run(save_message)
+        await _run_with_brake(agent, save_message)
         print()
 
         return True, None
@@ -212,13 +372,20 @@ async def _handle_command(agent: Agent, raw: str) -> tuple[bool, Agent | None]:
 
 
 async def run_repl(agent: Agent) -> None:
+    # Inject brake into agent so it shares the same signal files
+    agent.brake = repl_brake
+
+    # Clean up any leftover signals from a previously crashed session
+    repl_brake.reset()
+
     session = PromptSession(
         completer=SlashCompleter(),
         message=HTML("<b><ansigreen>&gt;</ansigreen></b> "),
         style=REPL_STYLE,
+        key_bindings=kb,
     )
 
-    print("输入消息 (Ctrl+D to exit, /help 查看命令)\n")
+    print("输入消息 (Ctrl+D to exit, ESC 暂停, /help 查看命令)\n")
 
     current_agent = agent
 
@@ -255,6 +422,38 @@ async def run_repl(agent: Agent) -> None:
                 if not stripped:
                     continue
 
+                # ── 处理暂停状态下的命令 ──
+                if repl_brake.is_paused():
+                    if stripped == "/go":
+                        repl_brake.resume()
+                        print("▶️  继续执行。\n")
+                        try:
+                            await _run_with_brake(current_agent, "")
+                        except AgentAborted:
+                            print("任务已中止。")
+                        print()
+                        continue
+                    elif stripped == "/abort":
+                        repl_brake.abort()
+                        print("🛑 已发送中止信号。\n")
+                        try:
+                            await _run_with_brake(current_agent, "")
+                        except AgentAborted:
+                            print("任务已中止。")
+                        print()
+                        continue
+                    else:
+                        # Treat as correction — inject via signal file, then resume
+                        repl_brake.pause(correction=stripped)
+                        repl_brake.resume()
+                        print(f"💬 纠偏已注入，继续执行。\n")
+                        try:
+                            await _run_with_brake(current_agent, "")
+                        except AgentAborted:
+                            print("任务已中止。")
+                        print()
+                        continue
+
                 # ── 处理 `/` 命令 ──
                 if stripped.startswith("/"):
                     try:
@@ -266,7 +465,14 @@ async def run_repl(agent: Agent) -> None:
                     continue
 
                 print()
-                await current_agent.run(stripped)
+                try:
+                    result = await _run_with_brake(current_agent, stripped)
+                    if result == "[PAUSED]":
+                        print("\n⏸️  已暂停。输入纠偏指令后 Enter，或 /go 继续，/abort 中止。\n")
+                    elif result == "[ABORTED]":
+                        print("任务已中止。")
+                except AgentAborted:
+                    print("任务已中止。")
                 print()
 
             else:
@@ -281,7 +487,12 @@ async def run_repl(agent: Agent) -> None:
 
                 # Process message through agent
                 prompt = format_bus_prompt(msg)
-                reply = await current_agent.run(prompt)
+                reply = await _run_with_brake(current_agent, prompt)
+
+                if reply == "[PAUSED]" or reply == "[ABORTED]":
+                    # Don't send replies for paused/aborted runs
+                    print()
+                    continue
 
                 # Send reply back only if the incoming message expects one.
                 # "result"/"error" are terminal notifications — replying to

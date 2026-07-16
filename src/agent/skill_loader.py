@@ -96,6 +96,14 @@ class SkillLoader:
         }
         return schema
 
+    def inject(self, name: str, skill: Skill) -> bool:
+        """Inject a skill from an external source.  Won't overwrite an
+        existing skill (agent-local skills take priority)."""
+        if name in self._skills:
+            return False
+        self._skills[name] = skill
+        return True
+
     def reload(self) -> None:
         """Re-scan the skills directory (useful for hot-reloading during development)."""
         self._skills.clear()

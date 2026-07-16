@@ -9,6 +9,7 @@ from .llm import LLMClient, Usage, ClientConfig
 from .context import Context
 from .tool import ToolRegistry, build_core_registry, ToolDef
 from .skill_loader import SkillLoader
+from .signals import AgentBrake, AgentAborted, AgentPaused
 from .prompts import SYSTEM_PROMPT, MEMORY_TEMPLATE
 from .persistence import AgentPersistence
 
@@ -127,6 +128,13 @@ class Agent:
             endpoint_name: Endpoint name on the bus (optional)
         """
         self.agent_name = agent_name or "temp_agent"
+
+        # Auto-detect agent-local skills directory (isolated per agent)
+        if agent_name and agent_name != "temp_agent":
+            local_skills = AgentPersistence.get_skills_dir(agent_name)
+            if local_skills.exists():
+                skills_dir = str(local_skills)
+
         self.skills_dir = skills_dir
         self.auto_save_session = auto_save_session
         self.is_child = is_child
@@ -134,6 +142,7 @@ class Agent:
         self.bus = bus
         self.endpoint_name = endpoint_name
         self._loaded_skills: set[str] = set()  # Track skills loaded via load_skill
+        self.brake = AgentBrake(self.agent_name)  # Emergency brake + correction
 
         self.llm = LLMClient(config=config)
         self.context = Context()
@@ -173,6 +182,41 @@ class Agent:
             return self.skill_loader.load(skill_name)
 
         self.registry.register(ToolDef(schema=schema, handler=handler))
+
+    def inject_skill(self, name: str) -> str:
+        """Inject a global skill into this agent for the current session only.
+
+        Reads skills/{name}/SKILL.md from the global pool, registers it in
+        memory (no file copying), rebuilds system prompt and re-registers
+        the load_skill tool so the LLM sees it immediately.
+
+        The skill disappears on restart — only the current session is affected.
+        """
+        from pathlib import Path as _Path
+
+        global_skill = _Path("skills") / name / "SKILL.md"
+        if not global_skill.exists():
+            available = [d.name for d in _Path("skills").iterdir()
+                         if (d / "SKILL.md").exists()]
+            return f"✗ 全局技能 '{name}' 不存在。可用: {', '.join(available) or '(无)'}"
+
+        parsed = self.skill_loader._parse(global_skill)
+        if parsed is None:
+            return f"✗ 无法解析 skills/{name}/SKILL.md"
+
+        ok = self.skill_loader.inject(name, parsed)
+        if not ok:
+            return f"✗ Agent 当前已拥有技能 '{name}'"
+
+        # Rebuild system prompt and re-register so LLM sees it immediately
+        self.llm.cfg.system_prompt = _build_system_prompt(
+            skill_loader=self.skill_loader,
+            memory_path=self.memory_path,
+            is_child=self.is_child,
+        )
+        self._register_load_skill()
+
+        return f"✓ 已注入技能 '{name}'（当前session生效）: {parsed.description}"
 
     def _register_context_aware_tools(self) -> None:
         """Register tools that need agent context (memory path, skills dir, etc)."""
@@ -248,88 +292,139 @@ class Agent:
         print(f"\033[2m{t}\033[0m", end="", flush=True)
 
     async def run(self, user_message: str):
-        self.context.add_user(user_message)
+        if user_message:
+            self.context.add_user(user_message)
 
         final_text: list[str] = []
         consecutive_errors = 0
         tools_schema = self.registry.schemas() if hasattr(self, "registry") else []
 
-        while True:
-            """ check compact """
-            turn_text: list[str] = []
+        # Check for abort / correction BEFORE reset (reset clears signals)
+        aborted = self.brake.is_aborted()
+        correction = self.brake.consume_correction()
 
-            def _on_text(t: str) -> None:
-                turn_text.append(t)
-                self.on_text(t)
+        self.brake.reset()
 
-            def _on_thinking(t: str) -> None:
-                self.on_thinking(t)
-            try:
-                ressponse = await self.llm.create(
-                    self.context.to_list(),
-                    tools = tools_schema,
-                    on_text=_on_text,
-                    on_thinking=_on_thinking
-                )
-                consecutive_errors = 0
-            except Exception as e:
-                consecutive_errors += 1
-                print(f"\n[LLM error #{consecutive_errors}]: {e}", flush=True)
-                if consecutive_errors >= 3:
-                    return f"Error: too many consecutive LLM failures — {e}"
-                await asyncio.sleep(2 ** consecutive_errors)
-                continue
+        if aborted:
+            raise AgentAborted()
 
-            content = ressponse.content
-            self.context.add_assistant(content)
-            tool_uses:list[dict] = []
-            for block in content:
-                btype = getattr(block, "type", None)
-                if btype == "tool_use":
-                    tool_uses.append(
-                        {
-                            "id": getattr(block, "id", None),
-                            "name": getattr(block, "name", None),
-                            "input": getattr(block, "input", {})
-                        }
-                    )
+        if correction:
+            self.context.add_user(f"[人类纠偏] {correction}")
 
-            if not tool_uses:
-                final_text.extend(turn_text)
-                break
+        try:
+            while True:
+                """ check compact """
 
-            tool_results: list[dict] = []
-            for tu in tool_uses:
-                name = tu["name"]
-                inp = tu["input"]
-                tid = tu["id"]
+                # ── 检测点 1: LLM 调用前 ──
+                await self.brake.wait_if_paused(self.context)
 
-                if self.on_tool_call:
-                    self.on_tool_call(name, inp)
+                turn_text: list[str] = []
+
+                def _on_text(t: str) -> None:
+                    turn_text.append(t)
+                    self.on_text(t)
+
+                def _on_thinking(t: str) -> None:
+                    self.on_thinking(t)
                 try:
-                    result = await self.registry.dispatch(name, inp)
-                    content_str = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-                    tool_results.append({
-                        "tool_use_id": tid,
-                        "type": "tool_result",
-                        "content": content_str,
-                    })
+                    ressponse = await self.llm.create(
+                        self.context.to_list(),
+                        tools = tools_schema,
+                        on_text=_on_text,
+                        on_thinking=_on_thinking
+                    )
+                    consecutive_errors = 0
                 except Exception as e:
-                    tool_results.append({
-                        "tool_use_id": tid,
-                        "type": "tool_result",
-                        "content": f"Tool error: {e}",
-                        "is_error": True,
-                    })
+                    consecutive_errors += 1
+                    print(f"\n[LLM error #{consecutive_errors}]: {e}", flush=True)
+                    if consecutive_errors >= 3:
+                        return f"Error: too many consecutive LLM failures — {e}"
+                    await asyncio.sleep(2 ** consecutive_errors)
+                    continue
 
-            self.context.add_tool_results(tool_results)
+                content = ressponse.content
+                self.context.add_assistant(content)
+                tool_uses:list[dict] = []
+                for block in content:
+                    btype = getattr(block, "type", None)
+                    if btype == "tool_use":
+                        tool_uses.append(
+                            {
+                                "id": getattr(block, "id", None),
+                                "name": getattr(block, "name", None),
+                                "input": getattr(block, "input", {})
+                            }
+                        )
 
-        # Auto-save session if enabled
-        if self.auto_save_session and self.agent_name != "temp_agent":
-            self.save_session()
+                if not tool_uses:
+                    final_text.extend(turn_text)
+                    break
 
-        # Return the final text
-        return "".join(final_text)
+                # ── 检测点 2: 工具调用前 ──
+                await self.brake.wait_if_paused(self.context)
+
+                tool_results: list[dict] = []
+                for tu in tool_uses:
+                    name = tu["name"]
+                    inp = tu["input"]
+                    tid = tu["id"]
+
+                    # ── 检测点 3: 每个工具执行前 ──
+                    await self.brake.wait_if_paused(self.context)
+
+                    if self.on_tool_call:
+                        self.on_tool_call(name, inp)
+                    try:
+                        result = await self.registry.dispatch(name, inp)
+                        content_str = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+                        tool_results.append({
+                            "tool_use_id": tid,
+                            "type": "tool_result",
+                            "content": content_str,
+                        })
+                    except Exception as e:
+                        tool_results.append({
+                            "tool_use_id": tid,
+                            "type": "tool_result",
+                            "content": f"Tool error: {e}",
+                            "is_error": True,
+                        })
+
+                self.context.add_tool_results(tool_results)
+
+            # Auto-save session if enabled
+            if self.auto_save_session and self.agent_name != "temp_agent":
+                self.save_session()
+
+            # Return the final text
+            return "".join(final_text)
+
+        except AgentAborted:
+            print("\n⏹️  Agent 已中止。", flush=True)
+            self._rollback_orphaned_tool_use()
+            return "[ABORTED]"
+        except AgentPaused:
+            self._rollback_orphaned_tool_use()
+            return "[PAUSED]"
+
+    def _rollback_orphaned_tool_use(self) -> None:
+        """Remove the last assistant message if it ends with tool_use blocks
+        that have no subsequent tool_result — otherwise the API rejects the
+        conversation on resume."""
+        msgs = self.context.messages
+        if not msgs:
+            return
+        last = msgs[-1]
+        if last.get("role") != "assistant":
+            return
+        content = last.get("content", [])
+        has_tool_use = any(
+            (isinstance(b, dict) and b.get("type") == "tool_use")
+            or (hasattr(b, "type") and getattr(b, "type", None) == "tool_use")
+            for b in content
+        )
+        if has_tool_use:
+            msgs.pop()
 
     def save(self, description: str = "", save_current_session: bool = True) -> str:
         """Save agent configuration and optionally current session.
@@ -341,12 +436,17 @@ class Agent:
         Returns:
             agent_name
         """
-        # Serialize config
+        # Serialize config — rebuild system_prompt from agent's OWN skills
+        # so we don't leak parent/global skill lists into agent.json
         config_dict = {
             "model": self.llm.cfg.model,
             "api_key": self.llm.cfg.api_key,
             "base_url": self.llm.cfg.base_url,
-            "system_prompt": self.llm.cfg.system_prompt,
+            "system_prompt": _build_system_prompt(
+                skill_loader=self.skill_loader,
+                memory_path=self.memory_path,
+                is_child=self.is_child,
+            ),
             "max_token": self.llm.cfg.max_token,
             "max_retrise": self.llm.cfg.max_retrise,
             "timeout": self.llm.cfg.timeout,

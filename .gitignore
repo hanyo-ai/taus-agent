@@ -229,3 +229,4 @@ tests/
 mise.toml
 
 temp/
+.signals/

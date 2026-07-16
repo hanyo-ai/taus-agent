@@ -45,7 +45,7 @@ async def main_async() -> None:
     repl_agent = Agent(
         config,
         agent_name="repl",  # Different name to avoid context conflicts
-        skills_dir="skills",
+        skills_dir=".agents/repl/skills",
         on_tool_call=lambda name, _: print(f"\n[repl tool: {name}] ", end="", flush=True),
         on_thinking=lambda t: print(f"\033[2m{t}\033[0m", end="", flush=True),
         auto_save_session=True, 
