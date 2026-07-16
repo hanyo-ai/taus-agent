@@ -227,3 +227,5 @@ examples/
 tests/
 
 mise.toml
+
+temp/

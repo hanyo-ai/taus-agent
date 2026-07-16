@@ -8,7 +8,9 @@ No event bus, no watchdogs, no LLM integration - just pure browser automation.
 import asyncio
 import base64
 import logging
+import platform
 import socket
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -177,7 +179,11 @@ class BrowserSession:
 
         # Ensure user_data_dir
         if not self.config.user_data_dir:
-            self.config.user_data_dir = tempfile.mkdtemp(prefix='taus-browser-')
+            if self.config.performance_mode:
+                # Persistent profile for cache/cookies/DNS/TLS reuse
+                self.config.user_data_dir = str(Path.home() / '.taus-browser-profile')
+            else:
+                self.config.user_data_dir = tempfile.mkdtemp(prefix='taus-browser-')
 
         # Build args
         debug_port = _find_free_port()
@@ -189,9 +195,14 @@ class BrowserSession:
         self._logger.debug(f'   User data dir: {self.config.user_data_dir}')
 
         # Launch subprocess
+        # On macOS ARM, force native arch to avoid Rosetta (x64 emulation is ~10x slower)
+        if sys.platform == 'darwin' and platform.machine() == 'arm64':
+            cmd = ['arch', '-arm64', executable_path, *launch_args]
+        else:
+            cmd = [executable_path, *launch_args]
+
         proc = await asyncio.create_subprocess_exec(
-            executable_path,
-            *launch_args,
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -541,25 +552,26 @@ class BrowserSession:
         if wait_until == 'commit':
             return
 
-        # Wait for lifecycle events
-        navigation_id = nav_result.get('loaderId')
+        # Poll document.readyState until target state is reached
         start = time.time()
-
-        acceptable_events: set[str] = {'networkIdle'}
-        if wait_until in ('load', 'domcontentloaded'):
-            acceptable_events.add('load')
-        if wait_until == 'domcontentloaded':
-            acceptable_events.add('DOMContentLoaded')
+        check_interval = 0.15
 
         while time.time() - start < timeout:
-            for event_data in list(cdp_session._lifecycle_events):
-                event_name = event_data.get('name')
-                event_loader = event_data.get('loaderId')
-                if event_loader and navigation_id and event_loader != navigation_id:
-                    continue
-                if event_name in acceptable_events:
+            try:
+                ready_state = await asyncio.wait_for(
+                    self.evaluate('document.readyState', target_id=target_id),
+                    timeout=3.0,
+                )
+                if ready_state == 'complete':
                     return
-            await asyncio.sleep(0.05)
+                if wait_until == 'domcontentloaded' and ready_state in ('interactive', 'complete'):
+                    return
+            except asyncio.TimeoutError:
+                pass
+            except Exception as e:
+                self._logger.debug(f'readyState poll error: {e}')
+
+            await asyncio.sleep(check_interval)
 
         self._logger.warning(f'Page readiness timeout ({timeout}s) for {url}')
 

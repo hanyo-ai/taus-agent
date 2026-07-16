@@ -87,7 +87,21 @@ CHROME_DETERMINISTIC_RENDERING_ARGS = [
     '--force-color-profile=srgb',
 ]
 
+CHROME_PERFORMANCE_ARGS = [
+    # Minimal flags for best performance — restores Chrome's native optimizations:
+    # DNS prefetch, QUIC/HTTP3, bfcache, TLS session resumption, SW cache, etc.
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-default-apps',
+    '--disable-sync',
+    '--disable-breakpad',
+    '--disable-blink-features=AutomationControlled',
+    '--disable-features=Translate',
+]
+
 CHROME_DEFAULT_ARGS = [
+    # Full automation flags — disables many Chrome optimizations for deterministic behavior.
+    # Use performance_mode=True to skip these and get near-native speed.
     '--disable-field-trial-config',
     '--disable-background-networking',
     '--disable-background-timer-throttling',
@@ -327,6 +341,10 @@ class BrowserConfig(BaseModel):
     keep_alive: bool = Field(
         default=False, description='Keep browser alive after session ends'
     )
+    performance_mode: bool = Field(
+        default=True,
+        description='Use minimal Chrome flags for near-native speed (DNS prefetch, QUIC, bfcache, etc.)',
+    )
     permissions: list[str] = Field(
         default_factory=lambda: ['clipboardReadWrite', 'notifications'],
         description='Browser permissions to grant',
@@ -360,15 +378,21 @@ class BrowserConfig(BaseModel):
         """Build the complete list of Chrome CLI launch arguments."""
 
         if self.user_data_dir is None:
-            # Create a temp directory for isolation
-            self.user_data_dir = tempfile.mkdtemp(prefix='taus-browser-')
+            if self.performance_mode:
+                # Persistent profile for cache/cookies/DNS/TLS session reuse
+                self.user_data_dir = str(Path.home() / '.taus-browser-profile')
+            else:
+                # Create a temp directory for isolation
+                self.user_data_dir = tempfile.mkdtemp(prefix='taus-browser-')
+
+        base_args = CHROME_PERFORMANCE_ARGS if self.performance_mode else CHROME_DEFAULT_ARGS
 
         if isinstance(self.ignore_default_args, list):
-            default_args = [a for a in CHROME_DEFAULT_ARGS if a not in self.ignore_default_args]
+            default_args = [a for a in base_args if a not in self.ignore_default_args]
         elif self.ignore_default_args is True:
             default_args = []
         else:
-            default_args = list(CHROME_DEFAULT_ARGS)
+            default_args = list(base_args)
 
         # Collect all args
         pre_args = [

@@ -22,37 +22,6 @@ source .venv/bin/activate
 no_proxy=* NO_PROXY=* python your_script.py
 ```
 
-## 完整流程
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  Step 1: 聚合新闻                                        │
-│  连接已有 Chrome → JS 提取 5 个新闻源标题 → 去噪保存       │
-├─────────────────────────────────────────────────────────┤
-│  Step 2: 生成帖子                                        │
-│  分析话题热度 → 挑选 3-5 个故事 → 人类语气重写             │
-│  （控制在 280 字符内，X 字数限制）                         │
-├─────────────────────────────────────────────────────────┤
-│  Step 3: 代理发帖                                        │
-│  启动代理 Chrome → 导航 X → 检查登录 → type_text 输入     │
-│  → 等待按钮激活 → 点击发送                                │
-└─────────────────────────────────────────────────────────┘
-```
-
-## Step 1: 新闻聚合
-
-### 新闻源配置
-
-```python
-NEWS_SOURCES = [
-    ("The Verge AI", "https://www.theverge.com/ai-artificial-intelligence", "theverge.com"),
-    ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/", "techcrunch.com"),
-    ("Wired AI", "https://www.wired.com/tag/artificial-intelligence/", "wired.com"),
-    ("VentureBeat AI", "https://venturebeat.com/category/ai/", "venturebeat.com"),
-    ("Ars Technica AI", "https://arstechnica.com/ai/", "arstechnica.com"),
-]
-```
-
 ### 提取 + 去噪
 
 ```python
@@ -117,33 +86,45 @@ async def extract_headlines(session, url, url_pattern=None, min_len=25, max_len=
     return json.loads(raw) if raw else []
 ```
 
-### 多源聚合
-
-```python
-async def aggregate_ai_news(session):
-    all_results = {}
-    for name, url, url_pattern in NEWS_SOURCES:
-        print(f"\n📰 {name}")
-        try:
-            items = await extract_headlines(session, url, url_pattern, wait=4.0)
-            clean_items = [it for it in items if not is_noise(it["title"])]
-            all_results[name] = clean_items
-            print(f"   ✅ {len(clean_items)} 篇文章")
-            for item in clean_items[:3]:
-                print(f"      • {item['title'][:90]}")
-        except Exception as e:
-            print(f"   ❌ 错误: {e}")
-            all_results[name] = {"error": str(e)}
-    return all_results
-```
 
 ## Step 2: 生成人类风格帖子
 
 ### ⚠️ 关键约束
 - **X 字数限制 280 字符**（中文字符算 1 个）
+- **链接处理**：X 的 t.co 短链固定算 **23 字符**，所以 `文字长度 + 23 = 实际占用`（不是 URL 原始长度）
+- **附链接效果更好**：帖子末尾加原文链接可引导点击，且只占用 23 字符
 - 内容要像真人说话，不能有 AI 味（避免 "在当今时代"、"综上所述" 等）
-- 挑 3-5 个最具话题性的故事，不要简单罗列新闻标题
 - 加个人观点/吐槽引发讨论
+
+### 字符数计算（含链接）
+
+```python
+# X 把任何 URL 一律视为 23 字符（t.co）
+# https 和 http 的 URL 都算 23
+# 所以实际字符数 = 纯文字长度 + 23
+
+import re
+
+def x_char_count(text: str) -> int:
+    """计算 X 实际字符数（URL=23）"""
+    urls = re.findall(r'https?://\S+', text)
+    count = len(text)
+    for url in urls:
+        count -= len(url)     # 去掉原始 URL
+        count += 23            # 换成 t.co 短链
+    return count
+
+# 示例
+tweet = "帖子正文...\n\nhttps://arstechnica.com/very-long-url-here/"
+assert x_char_count(tweet) <= 280  # 验证不超限
+```
+
+### 下载封面图
+
+```bash
+# 从新闻源下载封面图缓存到本地
+curl -sL -o /tmp/post_cover.jpg "https://cdn.arstechnica.net/.../cover-1024x648.jpg"
+```
 
 ### 话题热度分析
 
@@ -176,49 +157,6 @@ def analyze_hot_topics(all_results):
             print(f"🔥 {kw}: {len(matches)}篇")
 ```
 
-### 帖子生成模板（人类语气）
-
-```python
-def generate_post_content(stories):
-    """根据新闻生成人类风格的帖子。
-
-    策略：不要翻译新闻标题，要用自己的话重写，加观点、吐槽、上下文。
-    控制 280 字符以内。
-    """
-    # 分析话题后手动挑选 3-5 个最有料的故事
-    # 用口语化表达，不要用 AI 腔
-
-    post = (
-        "今天 AI 圈几个事：\n\n"
-        "OpenAI 要做硬件了——一个会动的 ChatGPT 音箱，没屏幕。"
-        "软件还没整明白就搞硬件\n\n"
-        "Grok 编程工具把用户代码库默认上传云端，"
-        "用AI写代码的兄弟注意检查\n\n"
-        "Meta 被起诉用AI做裁员，还把你IG照片拿去训练AI\n\n"
-        "纽约州禁建新数据中心一年\n\n"
-        "一边狂飙一边一地鸡毛，你们怎么看？"
-    )
-    # 上面是精简版 ~160 字符，留足余量
-    return post
-
-# ⚠️ 帖子风格指南：
-# ✅ 好的开头：
-#   "今天 AI 圈几个事挺值得聊的："
-#   "刷了一圈今天的 AI 新闻，几个有意思的点："
-#   "早上刷了一遍 AI 资讯，说几个值得关注的："
-#
-# ❌ 避免：
-#   "在当前的 AI 发展格局下……"（AI 腔）
-#   "综上所述……"（AI 腔）
-#   "值得关注的是……"（太正式）
-#   直接用编号列表堆新闻标题（缺少个人加工）
-#
-# ✅ 好的结尾（引发互动）：
-#   "你们怎么看？👇"
-#   "你们觉得哪个方向最值得关注？"
-#   "有什么我漏掉的吗？评论区补充"
-```
-
 ## Step 3: X (Twitter) 发帖
 
 ### ⚠️ 关键踩坑：React contenteditable 不能用 JS 设值
@@ -227,7 +165,7 @@ X 的发帖框是 `<div contenteditable="true">`，React 控制的。用 `editor
 
 **必须用 `page.type_text()` 真实键盘事件逐字符输入！**
 
-### 完整发帖流程
+### 纯文字发帖流程
 
 ```python
 import asyncio, json
@@ -253,7 +191,6 @@ async def post_to_x(session, content, max_chars=280):
     """)
 
     if not logged_in:
-        # 检查是否在登录页
         url = await session.get_current_url()
         if "login" in url.lower() or "i/flow" in url.lower():
             print("⚠️  未登录，请在浏览器中手动登录 X 后重试")
@@ -273,7 +210,7 @@ async def post_to_x(session, content, max_chars=280):
     await asyncio.sleep(0.3)
 
     # 3. 清空（如果有预填充文本）
-    await page.press_key("Meta+a")      # 全选
+    await page.press_key("Meta+a")
     await asyncio.sleep(0.1)
     await page.press_key("Backspace")
     await asyncio.sleep(0.2)
@@ -285,7 +222,6 @@ async def post_to_x(session, content, max_chars=280):
             await page.type_text(line)
             await asyncio.sleep(0.05)
         if i < len(lines) - 1:
-            # contenteditable 中 Shift+Enter 换行
             await page.press_key("Shift+Enter")
             await asyncio.sleep(0.05)
 
@@ -315,6 +251,178 @@ async def post_to_x(session, content, max_chars=280):
     print("⚠️  发送按钮未激活，请手动点击")
     return False
 ```
+
+### 附图片 + 链接发帖（增强版）
+
+发布带封面图和原文链接的帖子：先用 CDP `DOM.setFileInputFiles` 注入图片，再 `type_text` 输入文字和链接。
+
+#### ⚠️ 图片注入原理
+
+X 的图片上传是通过 `<input type="file" accept*="image">` 实现的。直接 CDP 注入文件路径，绕过系统文件选择对话框，比模拟点击更可靠。
+
+```python
+import asyncio
+from pathlib import Path
+
+async def post_to_x_with_image(session, content: str, image_path: str, max_chars=280):
+    """在 X 发帖，附带图片和原文链接。
+    
+    Args:
+        session: BrowserSession 实例
+        content: 帖子文字（末尾应包含 t.co 按 23 字符计算的原文链接）
+        image_path: 本地图片路径（已通过 curl 下载）
+        max_chars: 字符上限，默认 280
+    """
+
+    # X 的 URL 按 23 字符算
+    import re
+    urls = re.findall(r'https?://\S+', content)
+    adjusted_len = len(content) - sum(len(u) for u in urls) + len(urls) * 23
+    if adjusted_len > max_chars:
+        print(f"⚠️  调整后 {adjusted_len} 字符，超过 {max_chars}")
+        return False
+
+    await session.navigate("https://x.com/home", wait_until="load")
+    await asyncio.sleep(4)
+
+    # 1. 检查登录
+    logged_in = await session.evaluate("""(function() {
+        var el = document.querySelector('div[contenteditable="true"]');
+        if (!el) el = document.querySelector('div[role="textbox"]');
+        return el ? true : false;
+    })()""")
+    if not logged_in:
+        print("⚠️  未登录")
+        return False
+
+    # 2. 通过 CDP 直接注入图片文件
+    cdp_session = await session._get_focused_session()
+    
+    # 获取 DOM 文档根节点
+    doc = await cdp_session.cdp_client.send.DOM.getDocument(
+        params={"depth": -1}, session_id=cdp_session.session_id
+    )
+    
+    # 查找 file input 节点
+    file_node = await cdp_session.cdp_client.send.DOM.querySelector(
+        params={
+            "nodeId": doc['root']['nodeId'],
+            "selector": 'input[type="file"]'
+        },
+        session_id=cdp_session.session_id
+    )
+    
+    if not file_node.get('nodeId'):
+        # 如果 file input 还没渲染，先点一下 media 按钮触发
+        print("   file input 未找到，点击 media 按钮触发...")
+        await session.evaluate("""(function() {
+            var btn = document.querySelector('button[aria-label*="Add"]');
+            if (!btn) btn = document.querySelector('button[aria-label*="photo" i]');
+            if (btn) btn.click();
+        })()""")
+        await asyncio.sleep(1)
+        # 重新获取
+        doc = await cdp_session.cdp_client.send.DOM.getDocument(
+            params={"depth": -1}, session_id=cdp_session.session_id
+        )
+        file_node = await cdp_session.cdp_client.send.DOM.querySelector(
+            params={"nodeId": doc['root']['nodeId'], "selector": 'input[type="file"]'},
+            session_id=cdp_session.session_id
+        )
+
+    if file_node.get('nodeId'):
+        # 🔑 关键：DOM.setFileInputFiles 直接注入文件路径
+        await cdp_session.cdp_client.send.DOM.setFileInputFiles(
+            params={
+                "files": [str(Path(image_path).resolve())],
+                "nodeId": file_node['nodeId']
+            },
+            session_id=cdp_session.session_id
+        )
+        print("✅ 图片已注入")
+    else:
+        print("❌ 找不到 file input")
+        return False
+
+    # 3. 等待图片上传完成
+    await asyncio.sleep(4)
+    preview = await session.evaluate("""(function() {
+        var imgs = document.querySelectorAll('[data-testid="attachments"] img');
+        return imgs.length;
+    })()""")
+    print(f"   图片预览: {preview} 张")
+
+    # 4. 输入文字（含链接）— 用 type_text 逐字符输入
+    page = await session.get_current_page()
+    editor = await page.query_selector('div[contenteditable="true"]')
+    if not editor:
+        editor = await page.query_selector('div[role="textbox"]')
+    await editor.click()
+    await asyncio.sleep(0.3)
+
+    lines = content.split('\n')
+    for i, line in enumerate(lines):
+        if line:
+            await page.type_text(line)
+            await asyncio.sleep(0.03)
+        if i < len(lines) - 1:
+            await page.press_key("Shift+Enter")
+            await asyncio.sleep(0.03)
+
+    print(f"✅ 已输入文字")
+
+    # 5. 等待发送按钮激活并点击
+    for i in range(20):
+        await asyncio.sleep(0.5)
+        btn_info = await session.evaluate("""(function() {
+            var btn = document.querySelector('[data-testid="tweetButton"]');
+            if (!btn) btn = document.querySelector('[data-testid="tweetButtonInline"]');
+            return btn ? {disabled: btn.disabled} : null;
+        })()""")
+        if btn_info and not btn_info.get("disabled"):
+            await session.evaluate("""(function() {
+                var btn = document.querySelector('[data-testid="tweetButton"]');
+                if (!btn) btn = document.querySelector('[data-testid="tweetButtonInline"]');
+                if (btn) btn.click();
+            })()""")
+            print("🎉 帖子已发送！")
+            return True
+
+    print("⚠️  发送按钮未激活")
+    return False
+```
+
+#### 调用示例
+
+```python
+# 帖子内容：文字 + 末尾链接（链接算 23 字符）
+TWEET = """🍎 Apple 正式起诉 OpenAI
+
+前工程师离职加入 OpenAI 后，利用认证漏洞+未归还工作笔记本，连续数周窃取硬件机密文件。
+
+聊天记录："LOL 我发现还能访问共享文件夹 🤣"——成了呈堂证供。
+
+Apple 称 OpenAI 已挖走 400+ 前员工，这只是"冰山一角"。
+
+https://arstechnica.com/tech-policy/2026/07/apple-sues-openai-after-ex-engineer-allegedly-used-bug-to-steal-trade-secrets/"""
+
+# 先下载封面图
+# curl -sL -o /tmp/cover.jpg "https://cdn.arstechnica.net/.../cover.jpg"
+
+await post_to_x_with_image(session, TWEET, "/tmp/cover.jpg")
+```
+
+#### 操作顺序（重要）
+
+```
+1. 导航到 x.com/home
+2. CDP 注入图片 (DOM.setFileInputFiles)
+3. 等待图片上传完成 (sleep 4s)
+4. type_text 输入文字 + 链接
+5. 等待发送按钮激活 → 点击
+```
+
+> **为什么先注入图片再打字？** 图片上传需要时间，先上传可以并行等待；文字输入必须在前一步完成后进行，否则 React 状态可能冲突。
 
 ### 代理配置
 
@@ -401,6 +509,9 @@ if __name__ == "__main__":
 | websocket ImportError | `python-socks required` | websockets 走 SOCKS 代理 | `no_proxy=* NO_PROXY=*` |
 | X 发帖按钮一直 disabled | JS 设值后文字可见但按钮灰 | React contenteditable 不认 JS 设值 | `page.type_text()` 真实键盘输入 |
 | X 换行不生效 | `press_key("Enter")` 直接提交 | contenteditable 换行是 Shift+Enter | `page.press_key("Shift+Enter")` |
-| X 超字数发不出 | 375 字符按钮灰 | X 限制 280 字符 | 精简到 ~160 字符，用口语化短句 |
+| X 超字数发不出 | 375 字符按钮灰 | X 限制 280 字符 | 精简到 ~160 字符，末尾加链接（t.co=23字符） |
 | VentureBeat 大量噪音 | "Credit: VentureBeat made with Midjourney" | 图片 credit 文本在 `<a>` 标签 | noise_words 加 "Credit:" |
 | 新闻站导航超时 | `Page readiness timeout` 警告 | CDP loadEventFired 慢 | 无害，忽略，sleep 等渲染即可 |
+| 图片注入：file input 未找到 | `nodeId` 为 0 | X 懒加载，file input 初始不在 DOM | 先点击 media 按钮触发渲染，再 querySelector |
+| 图片注入：上传后预览不出现 | attachments 为空 | 上传需要 3-4s，太快就打字会冲突 | 注入后 sleep 4s 等上传完成，再输入文字 |
+| 链接太长超字符 | 原始 URL 100+ 字符 | 误以为 URL 全字符计数 | X 的 t.co 短链固定 23 字符，用 `x_char_count()` 正确计算 |

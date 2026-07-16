@@ -88,7 +88,14 @@ await session.stop()                  # 停止并清理
 | `set_viewport(width, height)` | 设置视口 |
 
 ```python
-# 连接已有浏览器（先在终端启动：chrome --remote-debugging-port=9222）
+# 推荐方式：连接已有 Chrome（速度最快，共享原生 profile）
+# 先手动启动 Chrome：
+#   arch -arm64 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+#     --remote-debugging-port=9222 \
+#     --user-data-dir="$HOME/.taus-browser-profile" \
+#     --profile-directory="Default" \
+#     --window-size=1280,900 \
+#     --proxy-server="socks5://127.0.0.1:12334"
 config = BrowserConfig(cdp_url="http://localhost:9222")
 session = BrowserSession(config=config)
 await session.start()
@@ -271,6 +278,24 @@ await page.evaluate(f"""
 
 > **为什么用 `json.dumps`：** 当 keyword 含单引号（如 `it's`）时，Python f-string 直接拼接会破坏 JS 语法，`json.dumps` 自动转义为 `"it's"`。
 
+## ⚠️ macOS ARM64：避免 Rosetta 模拟（否则慢 10 倍）
+
+如果 shell 跑在 Rosetta (x86_64) 下，直接启动 Chrome 会使用 x64 版本经由 Rosetta 模拟运行，**页面加载会从 1-2s 变成 10-12s**。
+
+`session.py` 的 `_launch_browser` 已内置检测：若 `sys.platform == 'darwin'` 且 `platform.machine() == 'arm64'`，自动在命令行前插入 `arch -arm64`，强制使用原生 ARM Chrome。
+
+**手动验证：**
+```bash
+sysctl -n sysctl.proc_translated  # 输出 1 = 当前在 Rosetta 下
+```
+
+如果手动启动 Chrome（用于 `cdp_url` 连接），务必加 `arch -arm64`：
+```bash
+arch -arm64 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.taus-browser-profile"
+```
+
 ## 代理配置
 
 需要代理访问受限站点时，通过 `ProxySettings` 配置：
@@ -280,7 +305,8 @@ from src.browser import BrowserConfig, BrowserSession, ProxySettings
 
 config = BrowserConfig(
     headless=False,
-    proxy=ProxySettings(server="http://127.0.0.1:12334"),
+    # ⚠️ 本机 Hiddify 使用 SOCKS5 代理，HTTP 代理对部分站点无效
+    proxy=ProxySettings(server="socks5://127.0.0.1:12334"),
     window_size={"width": 1280, "height": 900},
 )
 session = BrowserSession(config=config)
@@ -288,6 +314,11 @@ await session.start()
 ```
 
 代理只影响 Chrome 浏览器的网络请求，不影响 CDP 连接（CDP 是 localhost 直连）。
+
+**已知代理细节：**
+- Hiddify 端口 `12334`（SOCKS5 + HTTP），推荐用 `socks5://`
+- ClashX Pro 端口 `7890`/`9090`（HTTP）
+- 国内站点不要走代理，走 `--proxy-server` 时 Chrome 一般会自动对国内 IP 直连
 
 ## 实用场景
 
@@ -430,11 +461,13 @@ async def open_multiple_tabs():
 
 ## 注意事项
 
+- **macOS ARM64 必须 `arch -arm64`**：Rosetta x64 模拟导致页面加载慢 10 倍，`session.py` 已自动处理
 - 首次运行会创建临时 `user_data_dir`，如需持久化 cookie/登录态，请指定 `BrowserConfig(user_data_dir="/path/to/profile")`
+- **推荐持久化 profile**：`~/.taus-browser-profile`，从原生 Chrome Profile 复制而来，含 cookie/扩展/缓存
 - `headless=True` 时截图/渲染行为与有头模式可能不同，生产截图建议开启 `deterministic_rendering=True`
 - 元素点击会自动尝试 3 种方式计算可点击中心（ContentQuads → BoxModel → getBoundingClientRect），大部分场景无需手动处理
-- 连接已有浏览器时需先手动启动 Chrome：`google-chrome --remote-debugging-port=9222`
+- 连接已有浏览器时需先手动启动 Chrome，**必须指定 `--user-data-dir`**（Chrome 拒绝在默认 profile 开调试端口）
+- **导航等待改用 `document.readyState` 轮询**：lifecycle events 不可靠，`_navigate_and_wait` 现已直接用 CDP `Runtime.evaluate` 轮询
 - 同域导航默认 3s 超时，跨域 8s，可通过 `_navigate_and_wait` 的 timeout 参数调整
-- **导航超时警告不影响使用**：部分网站（如百度、新闻站）可能触发 `Page readiness timeout` 日志，页面实际已可用，后续 query_selector / evaluate 不受影响
 - **运行前清除代理**：`no_proxy=* NO_PROXY=* python ...` 避免系统代理干扰 CDP/websocket 连接
 - **React contenteditable 必须真实键盘输入**：`page.type_text()` / `page.press_key()`，JS 设值不会激活框架状态
