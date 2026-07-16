@@ -87,6 +87,38 @@ await session.stop()                  # 停止并清理
 | `get_cookies()` / `clear_cookies()` | Cookie 管理 |
 | `set_viewport(width, height)` | 设置视口 |
 
+### `wait_until` 策略选择
+
+`navigate()` 内部通过轮询 `document.readyState` 来判断页面是否加载完成。不同站点需用不同策略：
+
+| wait_until | 含义 | 适用场景 | 超时 |
+|------------|------|----------|------|
+| `load` | `readyState === 'complete'` | 传统 SSR 页面（如 example.com） | 同域 3s / 跨域 8s |
+| `domcontentloaded` | `readyState` 为 `interactive` 或 `complete` | 大部分现代网站 | 同上 |
+| `commit` | 导航请求已提交，不等待 readyState | **SPA/持续轮询站点（X/Twitter、小红书等）** | 20s（仅导航请求） |
+| `networkidle` | （暂未实现，预留） | — | — |
+
+**⚠️ X/Twitter、小红书等 SPA 必须用 `commit`**：这类站点有持续的长轮询/WebSocket 连接，`document.readyState` 可能永远不会变为 `complete`（或需要非常久），导致 `load`/`domcontentloaded` 必然超时。
+
+```python
+# ❌ X.com 上这两个都会超时
+await session.navigate("https://x.com/home", wait_until="load")             # 8s 超时
+await session.navigate("https://x.com/home", wait_until="domcontentloaded") # 3s 超时
+
+# ✅ 正确：用 commit 跳过 readyState 等待，然后手动轮询页面内容
+await session.navigate("https://x.com/home", wait_until="commit")
+
+# 手动等待页面就绪（轮询标题或关键元素）
+for i in range(15):
+    await asyncio.sleep(1)
+    title = await session.evaluate("document.title")
+    if title and title != "about:blank":  # 出现了有意义的标题
+        print(f"页面就绪: {title}")
+        break
+else:
+    print("页面加载超时，但可能需要检查网络/代理")
+```
+
 ```python
 # 推荐方式：连接已有 Chrome（速度最快，共享原生 profile）
 # 先手动启动 Chrome：
@@ -344,8 +376,13 @@ async def post_to_x(session: BrowserSession, content: str) -> bool:
     """在 X 上发帖。Content 需 ≤ 280 字符。"""
     import json
 
-    await session.navigate("https://x.com/home", wait_until="load")
-    await asyncio.sleep(4)
+    await session.navigate("https://x.com/home", wait_until="commit")
+    # 手动等待页面就绪（X 有持续长轮询，readyState 永远不会 complete）
+    for _ in range(10):
+        await asyncio.sleep(1)
+        title = await session.evaluate("document.title")
+        if title and title != "about:blank":
+            break
 
     # 检查登录状态
     logged_in = await session.evaluate("""
@@ -471,3 +508,4 @@ async def open_multiple_tabs():
 - 同域导航默认 3s 超时，跨域 8s，可通过 `_navigate_and_wait` 的 timeout 参数调整
 - **运行前清除代理**：`no_proxy=* NO_PROXY=* python ...` 避免系统代理干扰 CDP/websocket 连接
 - **React contenteditable 必须真实键盘输入**：`page.type_text()` / `page.press_key()`，JS 设值不会激活框架状态
+- **SPA/长轮询站点用 `wait_until='commit'`**：X/Twitter、小红书等有持续 WebSocket/长轮询的站点，`readyState` 永远不会 `complete`，`load`/`domcontentloaded` 必然超时。用 `commit` 跳过等待，然后手动轮询 `document.title` 或关键 DOM 元素确认页面就绪
