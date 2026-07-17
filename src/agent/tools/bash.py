@@ -12,12 +12,14 @@ TEMP_DIR = Path(tempfile.gettempdir())
 BASH_SCHEMA = {
     "name": "bash",
     "description": (
-        "Execute a shell command in bash and return the combined stdout/stderr output. "
-        "Use for file operations (ls, grep, find, rg), running scripts, installing packages, "
-        "and any other shell tasks. Output is capped at 2000 lines / 50 KB; when truncated "
-        "the full output is written to a temp file whose path is included. "
-        "The timeout parameter (default 30 s) kills the entire process tree on expiry. "
-        "Do NOT use for reading files — use the read tool instead."
+            "Execute a shell command in bash and return the combined stdout/stderr output. "
+            "Use for file operations (ls, grep, find, rg), running scripts, installing packages, "
+            "and any other shell tasks. Output is capped at 2000 lines / 50 KB; when truncated "
+            "the full output is written to a temp file whose path is included. "
+            "The timeout parameter (default 30 s) kills the entire process tree on expiry. "
+            "When using `find`, you can use `-prune` to skip directories (e.g., `.venv`) for better performance:"
+            "find /path/to/project -type d -name .venv -prune -o -type f \( -name '*.md' -o -name '*.txt' \) -print | head -50"
+            "Do NOT use for reading files — use the read tool instead."
     ),
     "input_schema": {
         "type": "object",

@@ -367,23 +367,76 @@ class Page:
                 session_id=sid,
             )
 
+    # Modifier key bitmask for CDP Input.dispatchKeyEvent
+    _MODIFIER_MASK: dict[str, int] = {
+        'Alt': 1, 'Control': 2, 'Ctrl': 2,
+        'Meta': 4, 'Cmd': 4, 'Win': 4,
+        'Shift': 8,
+    }
+
     async def press_key(self, key: str) -> None:
-        """Press a key (e.g. 'Enter', 'Tab', 'Escape', 'ArrowDown')."""
+        """Press a key or key combination.
+
+        Supports modifier combos: 'Meta+a', 'Ctrl+c', 'Shift+Enter',
+        'Ctrl+Shift+T', etc. Simple keys like 'Enter', 'Tab', 'Backspace'
+        also work as before.
+        """
         sid = await self._ensure_session()
+
+        # Parse modifier combinations: "Meta+a", "Shift+Enter", "Ctrl+Shift+I"
+        parts = key.split('+')
+        if len(parts) == 1:
+            # Simple key — no modifiers
+            await self._client.send.Input.dispatchKeyEvent(
+                params={'type': 'keyDown', 'key': key},
+                session_id=sid,
+            )
+            await self._client.send.Input.dispatchKeyEvent(
+                params={'type': 'keyUp', 'key': key},
+                session_id=sid,
+            )
+            return
+
+        # Modifier + key combination
+        main_key = parts[-1]
+        modifier_keys: list[str] = []
+        modifier_bits = 0
+
+        for part in parts[:-1]:
+            mask = self._MODIFIER_MASK.get(part, 0)
+            if mask:
+                modifier_bits |= mask
+                # Normalize to CDP-recognized key names
+                if part in ('Ctrl',):
+                    modifier_keys.append('Control')
+                elif part in ('Cmd', 'Win'):
+                    modifier_keys.append('Meta')
+                else:
+                    modifier_keys.append(part)
+
+        # 1. Press modifier keys down (in order)
+        for mod_key in modifier_keys:
+            await self._client.send.Input.dispatchKeyEvent(
+                params={'type': 'keyDown', 'key': mod_key},
+                session_id=sid,
+            )
+
+        # 2. Press and release the main key (with modifier bits set)
         await self._client.send.Input.dispatchKeyEvent(
-            params={
-                'type': 'keyDown',
-                'key': key,
-            },
+            params={'type': 'keyDown', 'key': main_key, 'modifiers': modifier_bits},
             session_id=sid,
         )
         await self._client.send.Input.dispatchKeyEvent(
-            params={
-                'type': 'keyUp',
-                'key': key,
-            },
+            params={'type': 'keyUp', 'key': main_key, 'modifiers': modifier_bits},
             session_id=sid,
         )
+
+        # 3. Release modifier keys (reverse order)
+        for mod_key in reversed(modifier_keys):
+            await self._client.send.Input.dispatchKeyEvent(
+                params={'type': 'keyUp', 'key': mod_key},
+                session_id=sid,
+            )
 
     @staticmethod
     def _fix_javascript_string(code: str) -> str:

@@ -389,8 +389,11 @@ class AgentPersistence:
                 if isinstance(content, list):
                     serialized_content = []
                     for item in content:
-                        if hasattr(item, "__dict__"):
-                            # Convert object to dict
+                        if isinstance(item, dict):
+                            # Dict or dict-subclass (e.g. ContentBlock):
+                            # preserve keys directly — __dict__ is empty for dict subclasses
+                            serialized_content.append(dict(item))
+                        elif hasattr(item, "__dict__"):
                             serialized_content.append(cls._obj_to_dict(item))
                         else:
                             serialized_content.append(item)

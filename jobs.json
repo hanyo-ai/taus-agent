@@ -1,0 +1,14 @@
+{
+  "managed_jobs": [
+    {
+      "id": "x_auto_reply",
+      "agent_ref": "browser-automation",
+      "message": "X 自动刷帖+挑帖+AI 回复 — 过滤低质量帖子，用AI生成自然回复并自动发送, 直接调用脚本 ./examples/x_auto_reply.py 即可",
+      "schedule_type": "interval_minutes",
+      "schedule_value": "10",
+      "log_file": "/tmp/x_auto_reply.log",
+      "state_file": "/tmp/x_reply_state.json",
+      "pid_file": "/tmp/x_auto_reply.pid"
+    }
+  ]
+}

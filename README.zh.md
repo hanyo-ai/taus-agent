@@ -82,6 +82,12 @@ python main.py
 
 直接在终端与 Agent 对话，所有内置工具和技能随取随用。
 
+> **💡 提示：** 如果你开启了系统代理（如 `HTTP_PROXY`、`HTTPS_PROXY`），Agent 可能无法连接本地 API 端点。可使用以下命令绕过所有代理：
+>
+> ```bash
+> no_proxy=* NO_PROXY=* python main.py
+> ```
+
 ### Python API
 
 ```python

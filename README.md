@@ -79,6 +79,12 @@ python main.py
 
 Start chatting with the agent directly in your terminal — it has access to all built-in tools and loaded skills.
 
+> **💡 Tip:** If you have system proxy enabled (e.g. `HTTP_PROXY`, `HTTPS_PROXY`), the agent may fail to connect to local API endpoints. Run with `no_proxy=*` to bypass all proxies:
+>
+> ```bash
+> no_proxy=* NO_PROXY=* python main.py
+> ```
+
 ### Python API
 
 ```python
