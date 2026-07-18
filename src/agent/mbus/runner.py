@@ -73,65 +73,33 @@ class AgentRunner:
         self.endpoint = None
 
     async def _run_loop(self) -> None:
-        """Main message processing loop with atomic message processing."""
+        """Main message processing loop.
+
+        Receives messages and runs the agent.  The agent is responsible for
+        sending any results back via the send_message tool — AgentRunner no
+        longer auto-replies, which eliminates duplicate messages when the
+        agent already called send_message explicitly.
+        """
         while self._running:
             try:
-                # Wait for incoming message
                 msg: Message = await self.endpoint.inbox.get()
 
-                # Handle stop signal
                 if msg.kind == "stop":
                     break
 
-                # CRITICAL: Lock to ensure atomic processing
-                # Prevents new messages from being added to context mid-processing
                 async with self._processing_lock:
-                    # Format prompt from message
                     prompt = self._format_prompt(msg)
-
-                    # Only "task"/"text" messages expect a reply. "result"/"error"
-                    # are terminal notifications (e.g. a sub-agent reporting back
-                    # after finishing work) — auto-replying to those would bounce
-                    # forever, since the recipient's own reply is itself a
-                    # "result" that the original sender would then reply to again.
-                    expects_reply = msg.kind in ("task", "text")
-
-                    # Run agent (this may take time - tool calls, LLM API, etc.)
                     try:
-                        reply = await self.agent.run(prompt)
-
-                        if expects_reply:
-                            # Send result back to sender
-                            result_msg = Message(
-                                sender=self.endpoint_name,
-                                recipient=msg.sender,
-                                content=reply or "",
-                                kind="result",
-                                correlation_id=msg.id,
-                            )
-                            await self.bus.send(result_msg)
-
+                        await self.agent.run(prompt)
                     except Exception as e:
-                        if expects_reply:
-                            # Send error back to sender
-                            error_msg = Message(
-                                sender=self.endpoint_name,
-                                recipient=msg.sender,
-                                content=f"Error: {e}",
-                                kind="error",
-                                correlation_id=msg.id,
-                            )
-                            await self.bus.send(error_msg)
-                        else:
-                            print(
-                                f"[{self.endpoint_name}] error handling "
-                                f"{msg.kind} message from {msg.sender}: {e}"
-                            )
+                        print(
+                            f"[{self.endpoint_name}] error handling "
+                            f"{msg.kind} message from {msg.sender}: {e}"
+                        )
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                # Log but continue
                 print(f"[{self.endpoint_name}] Unexpected error in run loop: {e}")
 
     def _format_prompt(self, msg: Message) -> str:

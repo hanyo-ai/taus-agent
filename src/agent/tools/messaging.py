@@ -168,12 +168,24 @@ async def _spawn_agent_handler(inp: dict, main_agent, bus) -> str:
         runner = AgentRunner(agent=child_agent, bus=bus, endpoint_name=name)
         runner.start()
 
-        # Send initial instructions
+        # Send initial instructions — use the ACTUAL endpoint name of the
+        # parent (session agent), NOT hardcoded "main".  Sub-agents must
+        # reply to this exact endpoint so the message routes back to the
+        # correct session on the bus.
+        parent_endpoint = main_agent.endpoint_name or "main"
         from ..mbus import Message
+
+        # Augment instructions so the LLM knows the correct reply endpoint
+        reply_instructions = (
+            f"{instructions}\n\n"
+            f"CRITICAL: When you finish the task use the send_message tool "
+            f"with recipient=\"{parent_endpoint}\" (exactly this string). "
+            f"Do NOT send to 'main' — send to '{parent_endpoint}'."
+        )
         init_msg = Message(
-            sender="main",
+            sender=parent_endpoint,
             recipient=name,
-            content=instructions,
+            content=reply_instructions,
             kind="task"
         )
         await bus.send(init_msg)
@@ -184,6 +196,7 @@ Name: {name}
 Description: {description or '(none)'}
 Endpoint: {name}
 Status: Running
+Reply endpoint: {parent_endpoint}
 
 The agent is now online and processing the initial task.
 Use send_message to communicate with it.

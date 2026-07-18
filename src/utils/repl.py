@@ -67,7 +67,7 @@ class StdinEscWatcher:
             return  # non-tty stdin, bail out
 
         try:
-            tty.setraw(fd)
+            tty.setcbreak(fd)
             while self._active:
                 ready, _, _ = select.select([sys.stdin], [], [], 0.3)
                 if not ready:

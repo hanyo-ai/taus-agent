@@ -506,6 +506,7 @@ async def chat(request: Request):
         run_task = asyncio.ensure_future(agent.run(message))
 
         try:
+            # ── Phase 1: Main agent run ──
             while True:
                 try:
                     evt_type, evt_data = await asyncio.wait_for(queue.get(), timeout=0.05)
@@ -529,6 +530,51 @@ async def chat(request: Request):
                     except Exception as e:
                         yield f"event: error\ndata: {json.dumps({'text': str(e)})}\n\n"
                     break
+
+            # ── Phase 2: Drain inbox for sub-agent results ──
+            # After the main agent finishes its turn, it may have spawned
+            # sub-agents.  Wait for their results on the bus and forward
+            # them to the frontend so the user sees the full workflow.
+            ep_name = getattr(agent, '_endpoint_registered', None)
+            if ep_name and _bus is not None:
+                ep = _bus.get_endpoint(ep_name)
+                if ep is not None:
+                    # Collect results for up to 120s total idle time
+                    idle_deadline = time.time() + 120
+                    while time.time() < idle_deadline:
+                        try:
+                            msg = await asyncio.wait_for(
+                                ep.inbox.get(), timeout=2.0
+                            )
+                        except asyncio.TimeoutError:
+                            # No message arrived — idling, check deadline
+                            continue
+
+                        # Got a message from a sub-agent
+                        from src.agent.mbus import format_bus_prompt
+
+                        # Add to agent context (saved on next run or save)
+                        prompt_text = format_bus_prompt(msg)
+                        agent.context.add_user(prompt_text)
+
+                        # Yield the message to the frontend
+                        yield (
+                            f"event: agent_message\n"
+                            f"data: {json.dumps({
+                                'sender': msg.sender,
+                                'content': msg.content,
+                                'kind': msg.kind,
+                                'id': msg.id,
+                            }, ensure_ascii=False)}\n\n"
+                        )
+
+                        # Auto-save session
+                        if agent.agent_name != "temp_agent":
+                            agent.save_session()
+
+                        # Reset idle deadline on each message
+                        idle_deadline = time.time() + 120
+
         finally:
             agent.on_text = orig_text
             agent.on_thinking = orig_thinking
